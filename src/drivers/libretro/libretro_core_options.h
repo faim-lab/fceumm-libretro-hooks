@@ -92,19 +92,6 @@ struct retro_core_option_definition option_defs_common[] = {
       },
       "disabled"
    },
-#ifdef NTSC_SCANLINES
-   {
-      "fceumm_ntsc_scanlines",
-      "NTSC Scanlines",
-      "Enable scanlines when using NTSC filters.",
-      {
-         { "disabled", NULL },
-         { "enabled",  NULL },
-         { NULL, NULL },
-      },
-      "disabled"
-   },
-#endif /* NTSC_SCANLINES */
 #endif
    {
       "fceumm_palette",
@@ -244,6 +231,36 @@ struct retro_core_option_definition option_defs_common[] = {
          { NULL, NULL},
       },
       "enabled",
+   },
+   {
+      "fceumm_zapper_tolerance",
+      "Zapper Tolerance",
+      "Sets how many pixels from target area is on target.",
+      {
+         { "0",  NULL },
+         { "1",  NULL },
+         { "2",  NULL },
+         { "3",  NULL },
+         { "4",  NULL },
+         { "5",  NULL },
+         { "6",  NULL },
+         { "7",  NULL },
+         { "8",  NULL },
+         { "9",  NULL },
+         { "10", NULL },
+         { "11", NULL },
+         { "12", NULL },
+         { "13", NULL },
+         { "14", NULL },
+         { "15", NULL },
+         { "16", NULL },
+         { "17", NULL },
+         { "18", NULL },
+         { "19", NULL },
+         { "20", NULL },
+         { NULL, NULL },
+      },
+      "6",
    },
    {
       "fceumm_sndquality",
