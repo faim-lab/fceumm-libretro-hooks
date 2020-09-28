@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #include <libretro.h>
 #include <streams/memory_stream.h>
@@ -125,7 +126,7 @@ typedef struct {
    /* input data */
    uint32_t JSReturn;                  /* player input data, 1 byte per player (1-4) */
    uint32_t MouseData[MAX_PORTS][3];   /* nes mouse data */
-   uint32_t FamicomData;               /* Famicom expansion port data */
+   uint32_t FamicomData[3];            /* Famicom expansion port data */
 } NES_INPUT_T;
 
 static NES_INPUT_T nes_input = { 0 };
@@ -2009,6 +2010,31 @@ bool retro_unserialize(const void * data, size_t size)
    return true;
 }
 
+static int checkGG(char c)
+{
+   static const char lets[16] = { 'A', 'P', 'Z', 'L', 'G', 'I', 'T', 'Y', 'E', 'O', 'X', 'U', 'K', 'S', 'V', 'N' };
+   int x;
+
+   for (x = 0; x < 16; x++)
+      if (lets[x] == toupper(c))
+         return 1;
+   return 0;
+}
+
+static int GGisvalid(const char *code)
+{
+   size_t len = strlen(code);
+   int i;
+   
+   if (len != 6 && len != 8)
+      return 0;
+
+   for (i = 0; i < len; i++)
+      if (!checkGG(code[i]))
+         return 0;
+   return 1;
+}
+
 void retro_cheat_reset(void)
 {
    FCEU_ResetCheats();
@@ -2017,25 +2043,64 @@ void retro_cheat_reset(void)
 void retro_cheat_set(unsigned index, bool enabled, const char *code)
 {
    char name[256];
+   char temp[256];
+   char *codepart;
    uint16 a;
    uint8  v;
    int    c;
    int    type = 1;
+   int    ret = 0;
+
+   if (code == NULL)
+      return;
+
    sprintf(name, "N/A");
+   strcpy(temp, code);
+   codepart = strtok(temp, "+,;._ ");
 
-   if (FCEUI_DecodeGG(code, &a, &v, &c))
-      goto input_cheat;
-
-   /* Not a Game Genie code. */
-
-   if (FCEUI_DecodePAR(code, &a, &v, &c, &type))
-      goto input_cheat;
-
-   /* Not a Pro Action Replay code. */
-
-   return;
-input_cheat:
-   FCEUI_AddCheat(name, a, v, c, type);
+   while (codepart)
+   {
+      if ((strlen(codepart) == 7) && (codepart[4]==':'))
+      {
+         /* raw code in xxxx:xx format */
+         log_cb.log(RETRO_LOG_DEBUG, "Cheat code added: '%s' (Raw)\n", codepart);
+         codepart[4] = '\0';
+         a = strtoul(codepart, NULL, 16);
+         v = strtoul(codepart + 5, NULL, 16);
+         c = -1;
+         /* Zero-page addressing modes don't go through the normal read/write handlers in FCEU, so
+          * we must do the old hacky method of RAM cheats. */
+         if (a < 0x0100) type = 0;
+         FCEUI_AddCheat(name, a, v, c, type);
+      }
+      else if ((strlen(codepart) == 10) && (codepart[4] == '?') && (codepart[7] == ':'))
+      {
+         /* raw code in xxxx?xx:xx */
+         log_cb.log(RETRO_LOG_DEBUG, "Cheat code added: '%s' (Raw)\n", codepart);
+         codepart[4] = '\0';
+         codepart[7] = '\0';
+         a = strtoul(codepart, NULL, 16);
+         v = strtoul(codepart + 8, NULL, 16);
+         c = strtoul(codepart + 5, NULL, 16);
+         /* Zero-page addressing modes don't go through the normal read/write handlers in FCEU, so
+          * we must do the old hacky method of RAM cheats. */
+         if (a < 0x0100) type = 0;
+         FCEUI_AddCheat(name, a, v, c, type);
+      }
+      else if (GGisvalid(codepart) && FCEUI_DecodeGG(codepart, &a, &v, &c))
+      {
+         FCEUI_AddCheat(name, a, v, c, type);
+         log_cb.log(RETRO_LOG_DEBUG, "Cheat code added: '%s' (GG)\n", codepart);
+      }
+      else if (FCEUI_DecodePAR(codepart, &a, &v, &c, &type))
+      {
+         FCEUI_AddCheat(name, a, v, c, type);
+         log_cb.log(RETRO_LOG_DEBUG, "Cheat code added: '%s' (PAR)\n", codepart);
+      }
+      else
+         log_cb.log(RETRO_LOG_DEBUG, "Invalid or unknown code: '%s'\n", codepart);
+      codepart = strtok(NULL,"+,;._ ");
+   }
 }
 
 typedef struct cartridge_db
@@ -2109,6 +2174,10 @@ static const struct cartridge_db fourscore_db_list[] =
    {
       "M.U.L.E. (USA)",
       0x0939852f
+   },
+   {
+      "Micro Mages",
+      0x4e6b9078
    },
    {
       "Monster Truck Rally (USA)",
