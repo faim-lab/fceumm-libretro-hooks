@@ -119,7 +119,7 @@ FCEUGI *FCEUI_CopyFamiStart();
 int FCEUI_Initialize(void);
 
 /* Emulates a frame. */
-void FCEUI_Emulate(uint8 **, int32 **, int32 *, int);
+  void FCEUI_Emulate(uint8 **, uint8 **, uint8 **, int32 **, int32 *, int);
 
 /* Closes currently loaded game */
 void FCEUI_CloseGame(void);

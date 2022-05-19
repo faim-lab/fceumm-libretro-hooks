@@ -201,7 +201,6 @@ static unsigned serialize_size;
 
 /* extern forward decls.*/
 extern FCEUGI *GameInfo;
-extern uint8 *XBuf;
 extern CartInfo iNESCart;
 extern CartInfo UNIFCart;
 extern int show_crosshair;
@@ -2497,70 +2496,6 @@ static void retro_run_blit(uint8_t *gfx)
    unsigned height = 240;
    unsigned pitch  = 512;
 
-#ifdef PSP
-   if (crop_overscan)
-   {
-      width  -= 16;
-      height -= 16;
-   }
-   texture_vram_p = (void*) (0x44200000 - (256 * 256)); /* max VRAM address - frame size */
-
-   sceKernelDcacheWritebackRange(retro_palette,256 * 2);
-   sceKernelDcacheWritebackRange(XBuf, 256*240 );
-
-   sceGuStart(GU_DIRECT, d_list);
-
-   /* sceGuCopyImage doesnt seem to work correctly with GU_PSM_T8
-    * so we use GU_PSM_4444 ( 2 Bytes per pixel ) instead
-    * with half the values for pitch / width / x offset
-    */
-   if (crop_overscan)
-      sceGuCopyImage(GU_PSM_4444, 4, 4, 120, 224, 128, XBuf, 0, 0, 128, texture_vram_p);
-   else
-      sceGuCopyImage(GU_PSM_4444, 0, 0, 128, 240, 128, XBuf, 0, 0, 128, texture_vram_p);
-
-   sceGuTexSync();
-   sceGuTexImage(0, 256, 256, 256, texture_vram_p);
-   sceGuTexMode(GU_PSM_T8, 0, 0, GU_FALSE);
-   sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
-   sceGuDisable(GU_BLEND);
-   sceGuClutMode(GU_PSM_5650, 0, 0xFF, 0);
-   sceGuClutLoad(32, retro_palette);
-
-   sceGuFinish();
-
-   video_cb(texture_vram_p, width, height, 256);
-#elif defined(RENDER_GSKIT_PS2)
-   uint32_t *buf = (uint32_t *)RETRO_HW_FRAME_BUFFER_VALID;
-
-   if (!ps2) {
-      if (!environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, (void **)&ps2) || !ps2) {
-         FCEU_printf(" Failed to get HW rendering interface!\n");
-         return;
-      }
-
-      if (ps2->interface_version != RETRO_HW_RENDER_INTERFACE_GSKIT_PS2_VERSION) {
-         FCEU_printf(" HW render interface mismatch, expected %u, got %u!\n",
-                  RETRO_HW_RENDER_INTERFACE_GSKIT_PS2_VERSION, ps2->interface_version);
-         return;
-      }
-
-      ps2->coreTexture->Width = width;
-      ps2->coreTexture->Height = height;
-      ps2->coreTexture->PSM = GS_PSM_T8;
-      ps2->coreTexture->ClutPSM = GS_PSM_CT16;
-      ps2->coreTexture->Filter = GS_FILTER_LINEAR;
-      ps2->padding = (struct retro_hw_ps2_insets){ crop_overscan_v ? 8.0f : 0.0f,
-                                                   crop_overscan_h ? 8.0f : 0.0f,
-                                                   crop_overscan_v ? 8.0f : 0.0f,
-                                                   crop_overscan_h ? 8.0f : 0.0f};
-   }
-
-   ps2->coreTexture->Clut = (u32*)retro_palette;
-   ps2->coreTexture->Mem = (u32*)gfx;
-
-   video_cb(buf, width, height, pitch);
-#else
 #ifdef HAVE_NTSC_FILTER
    if (use_ntsc)
    {
@@ -2601,12 +2536,12 @@ static void retro_run_blit(uint8_t *gfx)
       pitch  -= (crop_overscan_h ? 32 : 0);
       gfx    += (crop_overscan_v ? ((crop_overscan_h ? 8 : 0) + 256 * 8) : (crop_overscan_h ? 8 : 0));
 
-      if (use_raw_palette)
+      if (0 && use_raw_palette)
       {
-         uint8_t *deemp = XDBuf + (gfx - XBuf);
-         for (y = 0; y < height; y++, gfx += incr, deemp += incr)
-            for (x = 0; x < width; x++, gfx++, deemp++)
-               fceu_video_out[y * width + x] = retro_palette[*gfx & 0x3F] | (*deemp << 2);
+         /* uint8_t *deemp = XDBuf + (gfx - XBuf); */
+         /* for (y = 0; y < height; y++, gfx += incr, deemp += incr) */
+         /*    for (x = 0; x < width; x++, gfx++, deemp++) */
+         /*       fceu_video_out[y * width + x] = retro_palette[*gfx & 0x3F] | (*deemp << 2); */
       }
       else
       {
@@ -2616,12 +2551,11 @@ static void retro_run_blit(uint8_t *gfx)
       }
       video_cb(fceu_video_out, width, height, pitch);
    }
-#endif
 }
 
 void retro_run(void)
 {
-   uint8_t *gfx;
+   uint8_t *sp_bggfx, *bggfx, *sp_fggfx;
    int32_t i, ssize = 0;
    bool updated = false;
 
@@ -2631,9 +2565,12 @@ void retro_run(void)
    scroll_change_count = 0;
 
    FCEUD_UpdateInput();
-   FCEUI_Emulate(&gfx, &sound, &ssize, 0);
-
-   retro_run_blit(gfx);
+   FCEUI_Emulate(&sp_bggfx, &bggfx, &sp_fggfx, &sound, &ssize, 0);
+   // TODO don't draw sprites into bg, combine gfx layers into gfx here
+   // for now, draw into bggfx the bytes from sp_fggfx if they're not 0x80
+   // THEN we can not do that... and expose the three layers to mappy
+   // then we have perfect sprite and tile data.
+   retro_run_blit(bggfx);
 
    stereo_filter_apply(sound, ssize);
    audio_batch_cb((const int16_t*)sound, ssize);
