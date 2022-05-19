@@ -179,12 +179,12 @@ static void FDSInit(void) {
 
 void FCEU_FDSInsert(int oride) {
 	if (InDisk == 255) {
-		FCEU_DispMessage("Disk %d of %d Side %s Inserted",
-			1 + (SelectDisk >> 1), (TotalSides + 1) >> 1, (SelectDisk & 1) ? "B" : "A");
+		FCEU_DispMessage(RETRO_LOG_INFO, 2000, "Disk %d of %d Side %s Inserted",
+				1 + (SelectDisk >> 1), (TotalSides + 1) >> 1, (SelectDisk & 1) ? "B" : "A");
 		InDisk = SelectDisk;
 	} else {
-		FCEU_DispMessage("Disk %d of %d Side %s Ejected",
-			1 + (SelectDisk >> 1), (TotalSides + 1) >> 1, (SelectDisk & 1) ? "B" : "A");
+		FCEU_DispMessage(RETRO_LOG_INFO, 2000, "Disk %d of %d Side %s Ejected",
+				1 + (SelectDisk >> 1), (TotalSides + 1) >> 1, (SelectDisk & 1) ? "B" : "A");
 		InDisk = 255;
 	}
 }
@@ -195,12 +195,12 @@ void FCEU_FDSEject(void) {
 
 void FCEU_FDSSelect(void) {
 	if (InDisk != 255) {
-		FCEU_DispMessage("Eject disk before selecting.");
+		FCEUD_DispMessage(RETRO_LOG_WARN, 2000, "Eject disk before selecting");
 		return;
 	}
 	SelectDisk = ((SelectDisk + 1) % TotalSides) & 3;
-	FCEU_DispMessage("Disk %d of %d Side %s Selected",
-		1 + (SelectDisk >> 1), (TotalSides + 1) >> 1, (SelectDisk & 1) ? "B" : "A");
+	FCEU_DispMessage(RETRO_LOG_INFO, 2000, "Disk %d of %d Side %s Selected",
+			1 + (SelectDisk >> 1), (TotalSides + 1) >> 1, (SelectDisk & 1) ? "B" : "A");
 }
 
 /* 2018/12/15 - update irq timings */
@@ -346,6 +346,7 @@ static DECLFW(FDSWrite) {
 			X6502_IRQEnd(FCEU_IQEXT);
 			X6502_IRQEnd(FCEU_IQEXT2);
 		}
+		break;
 	case 0x4024:
 #ifndef USE_DINK
 		if ((InDisk != 255) && !(FDSRegs[5] & 0x4) && (FDSRegs[3] & 0x1)) {
@@ -707,8 +708,9 @@ int FDSLoad(const char *name, FCEUFILE *fp) {
 
 	char *fn = FCEU_MakeFName(FCEUMKF_FDSROM, 0, 0);
 
-	if (!(zp = FCEU_fopen(fn, 0, "rb", 0, NULL, 0))) {
+	if (!(zp = FCEU_fopen(fn, NULL, 0))) {
 		FCEU_PrintError("FDS BIOS ROM image missing!\n");
+		FCEUD_DispMessage(RETRO_LOG_ERROR, 3000, "FDS BIOS image (disksys.rom) missing");
 		free(fn);
 		return 0;
 	}
@@ -727,13 +729,12 @@ int FDSLoad(const char *name, FCEUFILE *fp) {
 		if (FDSBIOS)
 			free(FDSBIOS);
 		FDSBIOS = NULL;
-		free(zp->fp->data);
 		FCEU_fclose(zp);
 		FCEU_PrintError("Error reading FDS BIOS ROM image.\n");
+		FCEUD_DispMessage(RETRO_LOG_ERROR, 3000, "Error reading FDS BIOS image (disksys.rom)");
 		return 0;
 	}
 
-	free(zp->fp->data);
 	FCEU_fclose(zp);
 
 	FCEU_fseek(fp, 0, SEEK_SET);
@@ -751,37 +752,6 @@ int FDSLoad(const char *name, FCEUFILE *fp) {
 	}
 	
 	DiskWritten = 1;
-
-#if 0
-	/* auxillary rom loading for save file is now handled
-	 * using retro_get_memory_size/data */
-	{
-		FCEUFILE *tp;
-		char *fn = FCEU_MakeFName(FCEUMKF_FDS, 0, 0);
-
-		int x;
-		for (x = 0; x < TotalSides; x++) {
-			diskdatao[x] = (uint8*)FCEU_malloc(65500);
-			memcpy(diskdatao[x], diskdata[x], 65500);
-		}
-
-		if ((tp = FCEU_fopen(fn, 0, "rb", 0, NULL, 0))) {
-			FCEU_printf("Disk was written. Auxillary FDS file open \"%s\".\n", fn);
-			FreeFDSMemory();
-			if (!SubLoad(tp)) {
-				FCEU_PrintError("Error reading auxillary FDS file.\n");
-				if (FDSBIOS)
-					free(FDSBIOS);
-				FDSBIOS = NULL;
-				free(fn);
-				return(0);
-			}
-			FCEU_fclose(tp);
-			DiskWritten = 1;	/* For save state handling. */
-		}
-		free(fn);
-	}
-#endif
 
 	GameInfo->type = GIT_FDS;
 	GameInterface = FDSGI;

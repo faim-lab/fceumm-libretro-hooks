@@ -18,9 +18,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
 #include <ctype.h>
 
 #include "fceu-types.h"
@@ -114,7 +114,6 @@ void RebuildSubCheats(void) {
 		if (c->type == 1 && c->status) {
 			if (GetReadHandler(c->addr) == SubCheatsRead) {
 				/* Prevent a catastrophe by this check. */
-				/* FCEU_DispMessage("oops"); */
 			} else {
 				SubCheats[numsubcheats].PrevRead = GetReadHandler(c->addr);
 				SubCheats[numsubcheats].addr = c->addr;
@@ -162,13 +161,13 @@ static int AddCheatEntry(char *name, uint32 addr, uint8 val, int compare, int st
 	return(1);
 }
 
-void FCEU_LoadGameCheats(FILE *override)
+void FCEU_LoadGameCheats(void)
 {
    numsubcheats = savecheats = 0;
    RebuildSubCheats();
 }
 
-void FCEU_FlushGameCheats(FILE *override, int nosave) {
+void FCEU_FlushGameCheats(void) {
 	if (CheatComp)
    {
 		free(CheatComp);
@@ -388,7 +387,7 @@ int FCEUI_DecodePAR(const char *str, uint16 *a, uint8 *v, int *c, int *type) {
 
 	*c = -1;
 
-	/* 2020-08-31 - negativeExponent
+	/* 2020-08-31
 	 * Why is the top code set as default on non-debug runtime when
 	 * bottom code is what works for PAR?
 	 */
@@ -570,7 +569,7 @@ void FCEUI_CheatSearchBegin(void) {
 }
 
 
-static int INLINE CAbs(int x) {
+static INLINE int CAbs(int x) {
 	if (x < 0)
 		return(0 - x);
 	return x;

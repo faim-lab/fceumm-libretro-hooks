@@ -18,8 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
-#include  <string.h>
 #include  <stdio.h>
+#include  <string.h>
 #include  <stdlib.h>
 #include  <stdarg.h>
 
@@ -56,8 +56,8 @@ void (*GameStateRestore)(int version);
 
 readfunc ARead[0x10000];
 writefunc BWrite[0x10000];
-static readfunc *AReadG;
-static writefunc *BWriteG;
+static readfunc *AReadG = NULL;
+static writefunc *BWriteG = NULL;
 static int RWWrap = 0;
 
 static DECLFW(BNull)
@@ -71,12 +71,24 @@ static DECLFR(ANull)
 
 int AllocGenieRW(void)
 {
-	if (!(AReadG = (readfunc*)FCEU_malloc(0x8000 * sizeof(readfunc))))
-		return 0;
-	if (!(BWriteG = (writefunc*)FCEU_malloc(0x8000 * sizeof(writefunc))))
-		return 0;
-	RWWrap = 1;
-	return 1;
+   if (!AReadG)
+   {
+      if (!(AReadG = (readfunc*)FCEU_malloc(0x8000 * sizeof(readfunc))))
+         return 0;
+   }
+   else
+      memset(AReadG, 0, 0x8000 * sizeof(readfunc));
+
+   if (!BWriteG)
+   {
+      if (!(BWriteG = (writefunc*)FCEU_malloc(0x8000 * sizeof(writefunc))))
+         return 0;
+   }
+   else
+      memset(BWriteG, 0, 0x8000 * sizeof(writefunc));
+
+   RWWrap = 1;
+   return 1;
 }
 
 void FlushGenieRW(void)
@@ -92,8 +104,8 @@ void FlushGenieRW(void)
       }
       free(AReadG);
       free(BWriteG);
-      AReadG = 0;
-      BWriteG = 0;
+      AReadG = NULL;
+      BWriteG = NULL;
    }
    RWWrap = 0;
 }
@@ -193,7 +205,7 @@ void FCEUI_CloseGame(void)
       free(GameInfo->name);
    GameInfo->name = 0;
    if (GameInfo->type != GIT_NSF)
-      FCEU_FlushGameCheats(0, 0);
+      FCEU_FlushGameCheats();
    GameInterface(GI_CLOSE);
    ResetExState(0, 0);
    FCEU_CloseGenie();
@@ -226,7 +238,8 @@ int iNESLoad(const char *name, FCEUFILE *fp);
 int FDSLoad(const char *name, FCEUFILE *fp);
 int NSFLoad(FCEUFILE *fp);
 
-FCEUGI *FCEUI_LoadGame(const char *name, uint8_t *databuf, size_t databufsize)
+FCEUGI *FCEUI_LoadGame(const char *name, const uint8_t *databuf, size_t databufsize,
+      frontend_post_load_init_cb_t frontend_post_load_init_cb)
 {
    FCEUFILE *fp;
 
@@ -244,32 +257,42 @@ FCEUGI *FCEUI_LoadGame(const char *name, uint8_t *databuf, size_t databufsize)
    GameInfo->inputfc = -1;
    GameInfo->cspecial = 0;
 
-   FCEU_printf("Loading %s...\n\n", name);
-
-   GetFileBase(name);
-
-   fp = FCEU_fopen(name, NULL, "rb", 0, databuf, databufsize);
+   fp = FCEU_fopen(name, databuf, databufsize);
 
    if (!fp) {
       FCEU_PrintError("Error opening \"%s\"!", name);
-      return 0;
+
+      free(GameInfo);
+      GameInfo = NULL;
+
+      return NULL;
    }
 
    if (iNESLoad(name, fp))
       goto endlseq;
    if (NSFLoad(fp))
       goto endlseq;
-   if (UNIFLoad(name, fp))
+   if (UNIFLoad(NULL, fp))
       goto endlseq;
-   if (FDSLoad(name, fp))
+   if (FDSLoad(NULL, fp))
       goto endlseq;
 
    FCEU_PrintError("An error occurred while loading the file.\n");
    FCEU_fclose(fp);
-   return 0;
+
+   if (GameInfo->name)
+      free(GameInfo->name);
+   GameInfo->name = NULL;
+   free(GameInfo);
+   GameInfo = NULL;
+
+   return NULL;
 
 endlseq:
    FCEU_fclose(fp);
+
+   if (frontend_post_load_init_cb)
+      (*frontend_post_load_init_cb)();
 
    FCEU_ResetVidSys();
    if (GameInfo->type != GIT_NSF)
@@ -280,7 +303,7 @@ endlseq:
 
    if (GameInfo->type != GIT_NSF) {
       FCEU_LoadGamePalette();
-      FCEU_LoadGameCheats(0);
+      FCEU_LoadGameCheats();
    }
 
    FCEU_ResetPalette();
@@ -323,7 +346,7 @@ FCEUGI *FCEUI_CopyFamiStart(void)
 
 	if (GameInfo->type != GIT_NSF) {
 		FCEU_LoadGamePalette();
-		FCEU_LoadGameCheats(0);
+		FCEU_LoadGameCheats();
 	}
 
 	FCEU_ResetPalette();

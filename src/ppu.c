@@ -20,7 +20,6 @@
  */
 
 #include        <string.h>
-#include        <stdio.h>
 #include        <stdlib.h>
 
 #include        "fceu-types.h"
@@ -32,7 +31,6 @@
 #include        "general.h"
 #include        "fceu-endian.h"
 #include        "fceu-memory.h"
-#include        "ppuview.h"
 
 #include        "cart.h"
 #include        "palette.h"
@@ -719,7 +717,7 @@ static void DoLine(void)
 		GameHBIRQHook();
 		X6502_Run(85 - 16 - 10);
 	} else {
-		X6502_Run(6);	// Tried 65, caused problems with Slalom(maybe others)
+		X6502_Run(6);	/* Tried 65, caused problems with Slalom(maybe others) */
 		Fixit2();
 		X6502_Run(85 - 6 - 16);
 
@@ -1241,7 +1239,6 @@ int FCEUPPU_Loop(int skip) {
 
 			for (scanline = 0; scanline < totalscanlines; ) {	/* scanline is incremented in  DoLine.  Evil. :/ */
 				deempcnt[deemp]++;
-				if ((PPUViewer) && (scanline == PPUViewScanline)) UpdatePPUView(1);
 				DoLine();
 				if (scanline < normal_scanlines || scanline == totalscanlines)
 					overclocked = 0;

@@ -5,7 +5,14 @@
 #include <stdarg.h>
 #include <ctype.h>
 
+#ifdef _MSC_VER
+#include <compat/msvc.h>
+#endif
+
 #include <libretro.h>
+#include <string/stdstring.h>
+#include <file/file_path.h>
+#include <streams/file_stream.h>
 #include <streams/memory_stream.h>
 #include <libretro_dipswitch.h>
 #include <libretro_core_options.h>
@@ -28,6 +35,10 @@
 #include "../../vsuni.h"
 #include "../../video.h"
 
+#ifdef PSP
+#include "pspgu.h"
+#endif
+
 #if defined(RENDER_GSKIT_PS2)
 #include "libretro-common/include/libretro_gskit_ps2.h"
 #endif
@@ -45,12 +56,17 @@
 #define RETRO_DEVICE_FC_OEKAKIDS RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_MOUSE,  3)
 #define RETRO_DEVICE_FC_SHADOW   RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_MOUSE,  4)
 #define RETRO_DEVICE_FC_4PLAYERS RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 2)
+#define RETRO_DEVICE_FC_HYPERSHOT RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 3)
 #define RETRO_DEVICE_FC_AUTO     RETRO_DEVICE_JOYPAD
 
 #define NES_WIDTH   256
 #define NES_HEIGHT  240
 #define NES_8_7_PAR  ((width * (8.0 / 7.0)) / height)
 #define NES_4_3      ((width / (height * (256.0 / 240.0))) * 4.0 / 3.0)
+#define NES_PP       ((width / (height * (256.0 / 240.0))) * 16.0 / 15.0)
+
+#define NES_PAL_FPS  (838977920.0 / 16777215.0)
+#define NES_NTSC_FPS (1008307711.0 / 16777215.0)
 
 #if defined(_3DS)
 void* linearMemAlign(size_t size, size_t alignment);
@@ -69,14 +85,14 @@ static retro_input_state_t input_cb = NULL;
 static retro_audio_sample_batch_t audio_batch_cb = NULL;
 retro_environment_t environ_cb = NULL;
 #ifdef PSP
-static bool use_overscan;
+static bool crop_overscan;
 #else
-static bool overscan_h;
-static bool overscan_v;
+static bool crop_overscan_h;
+static bool crop_overscan_v;
 #endif
 
 static bool use_raw_palette;
-static bool use_par;
+static int aspect_ratio_par;
 
 /*
  * Flags to keep track of whether turbo
@@ -87,7 +103,7 @@ static bool use_par;
  * each player
  */
 
-#define MAX_BUTTONS 8
+#define MAX_BUTTONS 9
 #define TURBO_BUTTONS 2
 unsigned char turbo_button_toggle[MAX_PLAYERS][TURBO_BUTTONS] = { {0} };
 
@@ -105,6 +121,7 @@ static const keymap turbomap[] = {
 static const keymap bindmap[] = {
    { RETRO_DEVICE_ID_JOYPAD_A, JOY_A },
    { RETRO_DEVICE_ID_JOYPAD_B, JOY_B },
+   { RETRO_DEVICE_ID_JOYPAD_L3, JOY_A | JOY_B },
    { RETRO_DEVICE_ID_JOYPAD_SELECT, JOY_SELECT },
    { RETRO_DEVICE_ID_JOYPAD_START, JOY_START },
    { RETRO_DEVICE_ID_JOYPAD_UP, JOY_UP },
@@ -134,6 +151,8 @@ enum RetroZapperInputModes{RetroLightgun, RetroMouse, RetroPointer};
 static enum RetroZapperInputModes zappermode = RetroLightgun;
 
 static bool libretro_supports_bitmasks = false;
+static bool libretro_supports_option_categories = false;
+static unsigned libretro_msg_interface_version = 0;
 
 /* emulator-specific variables */
 
@@ -155,12 +174,10 @@ unsigned dendy = 0;
 
 static unsigned systemRegion = 0;
 static unsigned opt_region = 0;
-static unsigned opt_showAdvSoundOptions = 0;
-static unsigned opt_showAdvSystemOptions = 0;
+static bool opt_showAdvSoundOptions = true;
+static bool opt_showAdvSystemOptions = true;
 
-int FCEUnetplay;
-#ifdef PSP
-#include "pspgu.h"
+#if defined(PSP) || defined(PS2)
 static __attribute__((aligned(16))) uint16_t retro_palette[256];
 #else
 static uint16_t retro_palette[256];
@@ -181,9 +198,6 @@ static int32_t *sound = 0;
 static uint32_t Dummy = 0;
 static uint32_t current_palette = 0;
 static unsigned serialize_size;
-
-int PPUViewScanline=0;
-int PPUViewer=0;
 
 /* extern forward decls.*/
 extern FCEUGI *GameInfo;
@@ -245,16 +259,9 @@ RETRO_API uint32 retro_count_scroll_changes(struct scroll_change *changes, uint3
 
 /* emulator-specific callback functions */
 
-void UpdatePPUView(int refreshchr) { }
-
 const char * GetKeyboard(void)
 {
    return "";
-}
-
-int FCEUD_SendData(void *data, uint32 len)
-{
-   return 1;
 }
 
 #define BUILD_PIXEL_RGB565(R,G,B) (((int) ((R)&0x1f) << RED_SHIFT) | ((int) ((G)&0x3f) << GREEN_SHIFT) | ((int) ((B)&0x1f) << BLUE_SHIFT))
@@ -316,15 +323,6 @@ void FCEUD_SetPalette(uint8_t index, uint8_t r, uint8_t g, uint8_t b)
 #endif
 }
 
-void FCEUD_GetPalette(unsigned char i, unsigned char *r, unsigned char *g, unsigned char *b)
-{
-}
-
-bool FCEUD_ShouldDrawInputAids (void)
-{
-   return 1;
-}
-
 static struct retro_log_callback log_cb;
 
 static void default_logger(enum retro_log_level level, const char *fmt, ...) {}
@@ -339,37 +337,67 @@ void FCEUD_Message(char *s)
    log_cb.log(RETRO_LOG_INFO, "%s", s);
 }
 
-void FCEUD_DispMessage(char *m)
-{  struct retro_message msg;
-   msg.msg = m;
-   msg.frames = 180;
-   environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
-}
+void FCEUD_DispMessage(enum retro_log_level level, unsigned duration, const char *str)
+{
+   if (!environ_cb)
+      return;
 
-void FCEUD_NetworkClose(void)
-{ }
+   if (libretro_msg_interface_version >= 1)
+   {
+      struct retro_message_ext msg;
+      unsigned priority;
+
+      switch (level)
+      {
+         case RETRO_LOG_ERROR:
+            priority = 5;
+            break;
+         case RETRO_LOG_WARN:
+            priority = 4;
+            break;
+         case RETRO_LOG_INFO:
+            priority = 3;
+            break;
+         case RETRO_LOG_DEBUG:
+         default:
+            priority = 1;
+            break;
+      }
+
+      msg.msg      = str;
+      msg.duration = duration;
+      msg.priority = priority;
+      msg.level    = level;
+      msg.target   = RETRO_MESSAGE_TARGET_OSD;
+      msg.type     = RETRO_MESSAGE_TYPE_NOTIFICATION_ALT;
+      msg.progress = -1;
+
+      environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &msg);
+   }
+   else
+   {
+      float fps       = (FSettings.PAL || dendy) ? NES_PAL_FPS : NES_NTSC_FPS;
+      unsigned frames = (unsigned)(((float)duration * fps / 1000.0f) + 0.5f);
+      struct retro_message msg;
+
+      msg.msg    = str;
+      msg.frames = frames;
+
+      environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+   }
+}
 
 void FCEUD_SoundToggle (void)
 {
    FCEUI_SetSoundVolume(sndvolume);
 }
 
-void FCEUD_VideoChanged (void)
-{ }
-
-FILE *FCEUD_UTF8fopen(const char *n, const char *m)
-{
-   if (n)
-      return fopen(n, m);
-   else
-      return NULL;
-}
-
 /*palette for FCEU*/
-#define PAL_TOTAL   16 /* total no. of palettes in palettes[] */
-#define PAL_DEFAULT (PAL_TOTAL + 1)
-#define PAL_RAW     (PAL_TOTAL + 2)
-#define PAL_CUSTOM  (PAL_TOTAL + 3)
+#define PAL_INTERNAL 16 /* Number of palettes in palettes[] */
+#define PAL_DEFAULT  (PAL_INTERNAL + 1)
+#define PAL_RAW      (PAL_INTERNAL + 2)
+#define PAL_CUSTOM   (PAL_INTERNAL + 3)
+#define PAL_TOTAL    PAL_CUSTOM
 
 static int external_palette_exist = 0;
 extern int ipalette;
@@ -674,6 +702,333 @@ struct st_palettes palettes[] = {
    }
 };
 
+/* ========================================
+ * Palette switching START
+ * ======================================== */
+
+/* Period in frames between palette switches
+ * when holding RetroPad L2 + Left/Right */
+#define PALETTE_SWITCH_PERIOD 30
+
+static bool libretro_supports_set_variable         = false;
+static bool palette_switch_enabled                 = false;
+static unsigned palette_switch_counter             = 0;
+struct retro_core_option_value *palette_opt_values = NULL;
+static const char *palette_labels[PAL_TOTAL]       = {0};
+
+static uint32_t palette_switch_get_current_index(void)
+{
+   if (current_palette < PAL_INTERNAL)
+      return current_palette + 1;
+
+   switch (current_palette)
+   {
+      case PAL_DEFAULT:
+         return 0;
+      case PAL_RAW:
+      case PAL_CUSTOM:
+         return current_palette - 1;
+      default:
+         break;
+   }
+
+   /* Cannot happen */
+   return 0;
+}
+
+static void palette_switch_init(void)
+{
+   size_t i;
+   struct retro_core_option_v2_definition *opt_defs      = option_defs;
+   struct retro_core_option_v2_definition *opt_def       = NULL;
+#ifndef HAVE_NO_LANGEXTRA
+   struct retro_core_option_v2_definition *opt_defs_intl = NULL;
+   struct retro_core_option_v2_definition *opt_def_intl  = NULL;
+   unsigned language                                     = 0;
+#endif
+
+   libretro_supports_set_variable = false;
+   if (environ_cb(RETRO_ENVIRONMENT_SET_VARIABLE, NULL))
+      libretro_supports_set_variable = true;
+
+   palette_switch_enabled = libretro_supports_set_variable;
+   palette_switch_counter = 0;
+
+#ifndef HAVE_NO_LANGEXTRA
+   if (environ_cb(RETRO_ENVIRONMENT_GET_LANGUAGE, &language) &&
+       (language < RETRO_LANGUAGE_LAST) &&
+       (language != RETRO_LANGUAGE_ENGLISH) &&
+       options_intl[language])
+      opt_defs_intl = options_intl[language]->definitions;
+#endif
+
+   /* Find option corresponding to palettes key */
+   for (opt_def = opt_defs; opt_def->key; opt_def++)
+      if (!strcmp(opt_def->key, "fceumm_palette"))
+         break;
+
+   /* Cache option values array for fast access
+    * when setting palette index */
+   palette_opt_values = opt_def->values;
+
+   /* Loop over all palette values and fetch
+    * palette labels for notification purposes */
+   for (i = 0; i < PAL_TOTAL; i++)
+   {
+      const char *value       = opt_def->values[i].value;
+      const char *value_label = NULL;
+
+      /* Check if we have a localised palette label */
+#ifndef HAVE_NO_LANGEXTRA
+      if (opt_defs_intl)
+      {
+         /* Find localised option corresponding to key */
+         for (opt_def_intl = opt_defs_intl;
+              opt_def_intl->key;
+              opt_def_intl++)
+         {
+            if (!strcmp(opt_def_intl->key, "fceumm_palette"))
+            {
+               size_t j = 0;
+
+               /* Search for current option value */
+               for (;;)
+               {
+                  const char *value_intl = opt_def_intl->values[j].value;
+
+                  if (!value_intl)
+                     break;
+
+                  if (!strcmp(value, value_intl))
+                  {
+                     /* We have a match; fetch localised label */
+                     value_label = opt_def_intl->values[j].label;
+                     break;
+                  }
+
+                  j++;
+               }
+
+               break;
+            }
+         }
+      }
+#endif
+      /* If localised palette label is unset,
+       * use label from option_defs_us or fallback
+       * to value itself */
+      if (!value_label)
+         value_label = opt_def->values[i].label;
+      if (!value_label)
+         value_label = value;
+
+      palette_labels[i] = value_label;
+   }
+}
+
+static void palette_switch_deinit(void)
+{
+   libretro_supports_set_variable = false;
+   palette_switch_enabled         = false;
+   palette_switch_counter         = 0;
+   palette_opt_values             = NULL;
+}
+
+static void palette_switch_set_index(uint32_t palette_index)
+{
+   struct retro_variable var = {0};
+
+   if (palette_index >= PAL_TOTAL)
+      palette_index = PAL_TOTAL - 1;
+
+   /* Notify frontend of option value changes */
+   var.key   = "fceumm_palette";
+   var.value = palette_opt_values[palette_index].value;
+   environ_cb(RETRO_ENVIRONMENT_SET_VARIABLE, &var);
+
+   /* Display notification message */
+   FCEUD_DispMessage(RETRO_LOG_INFO, 2000, palette_labels[palette_index]);
+}
+
+/* ========================================
+ * Palette switching END
+ * ======================================== */
+
+/* ========================================
+ * Stereo Filter START
+ * ======================================== */
+
+enum stereo_filter_type
+{
+   STEREO_FILTER_NULL = 0,
+   STEREO_FILTER_DELAY
+};
+static enum stereo_filter_type current_stereo_filter = STEREO_FILTER_NULL;
+
+#define STEREO_FILTER_DELAY_MS_DEFAULT 15.0f;
+typedef struct
+{
+   int32_t *samples;
+   size_t samples_size;
+   size_t samples_pos;
+   size_t delay_count;
+} stereo_filter_delay_t;
+static stereo_filter_delay_t stereo_filter_delay;
+static float stereo_filter_delay_ms = STEREO_FILTER_DELAY_MS_DEFAULT;
+
+static void stereo_filter_apply_null(int32_t *sound_buffer, size_t size)
+{
+   size_t i;
+   /* Each element of sound_buffer is a 16 bit mono sample
+    * stored in a 32 bit value. We convert this to stereo
+    * by copying the mono sample to both the high and low
+    * 16 bit regions of the value and casting sound_buffer
+    * to int16_t when uploading to the frontend */
+   for (i = 0; i < size; i++)
+      sound_buffer[i] = (sound_buffer[i] << 16) |
+            (sound_buffer[i] & 0xFFFF);
+}
+
+static void stereo_filter_apply_delay(int32_t *sound_buffer, size_t size)
+{
+   size_t delay_capacity = stereo_filter_delay.samples_size -
+         stereo_filter_delay.samples_pos;
+   size_t i;
+
+   /* Copy current samples into the delay buffer
+    * (resizing if required) */
+   if (delay_capacity < size)
+   {
+      int32_t *tmp_buffer = NULL;
+      size_t tmp_buffer_size;
+
+      tmp_buffer_size = stereo_filter_delay.samples_size + (size - delay_capacity);
+      tmp_buffer_size = (tmp_buffer_size << 1) - (tmp_buffer_size >> 1);
+      tmp_buffer      = (int32_t *)malloc(tmp_buffer_size * sizeof(int32_t));
+
+      memcpy(tmp_buffer, stereo_filter_delay.samples,
+            stereo_filter_delay.samples_pos * sizeof(int32_t));
+
+      free(stereo_filter_delay.samples);
+
+      stereo_filter_delay.samples      = tmp_buffer;
+      stereo_filter_delay.samples_size = tmp_buffer_size;
+   }
+
+   for (i = 0; i < size; i++)
+      stereo_filter_delay.samples[i +
+            stereo_filter_delay.samples_pos] = sound_buffer[i];
+
+   stereo_filter_delay.samples_pos += size;
+
+   /* If we have enough samples in the delay
+    * buffer, mix them into the output */
+   if (stereo_filter_delay.samples_pos >
+         stereo_filter_delay.delay_count)
+   {
+      size_t delay_index    = 0;
+      size_t samples_to_mix = stereo_filter_delay.samples_pos -
+            stereo_filter_delay.delay_count;
+      samples_to_mix        = (samples_to_mix > size) ?
+            size : samples_to_mix;
+
+      /* Perform 'null' filtering for any samples for
+       * which a delay buffer entry is unavailable */
+      if (size > samples_to_mix)
+         for (i = 0; i < size - samples_to_mix; i++)
+            sound_buffer[i] = (sound_buffer[i] << 16) |
+                  (sound_buffer[i] & 0xFFFF);
+
+      /* Each element of sound_buffer is a 16 bit mono sample
+       * stored in a 32 bit value. We convert this to stereo
+       * by copying the mono sample to the high (left channel)
+       * 16 bit region and the delayed sample to the low
+       * (right channel) region, casting sound_buffer
+       * to int16_t when uploading to the frontend */
+      for (i = size - samples_to_mix; i < size; i++)
+         sound_buffer[i] = (sound_buffer[i] << 16) |
+               (stereo_filter_delay.samples[delay_index++] & 0xFFFF);
+
+      /* Remove the mixed samples from the delay buffer */
+      memmove(stereo_filter_delay.samples,
+            stereo_filter_delay.samples + samples_to_mix,
+            (stereo_filter_delay.samples_pos - samples_to_mix) *
+                  sizeof(int32_t));
+      stereo_filter_delay.samples_pos -= samples_to_mix;
+   }
+   /* Otherwise apply the regular 'null' filter */
+   else
+      for (i = 0; i < size; i++)
+            sound_buffer[i] = (sound_buffer[i] << 16) |
+                  (sound_buffer[i] & 0xFFFF);
+}
+
+static void (*stereo_filter_apply)(int32_t *sound_buffer, size_t size) = stereo_filter_apply_null;
+
+static void stereo_filter_deinit_delay(void)
+{
+   if (stereo_filter_delay.samples)
+      free(stereo_filter_delay.samples);
+
+   stereo_filter_delay.samples      = NULL;
+   stereo_filter_delay.samples_size = 0;
+   stereo_filter_delay.samples_pos  = 0;
+   stereo_filter_delay.delay_count  = 0;
+}
+
+static void stereo_filter_init_delay(void)
+{
+   size_t initial_samples_size;
+
+   /* Convert delay (ms) to number of samples */
+   stereo_filter_delay.delay_count = (size_t)(
+         (stereo_filter_delay_ms / 1000.0f) *
+               (float)sndsamplerate);
+
+   /* Preallocate delay_count + worst case expected
+    * samples per frame to minimise reallocation of
+    * the samples buffer during runtime */
+   initial_samples_size = stereo_filter_delay.delay_count +
+         (size_t)((float)sndsamplerate / NES_PAL_FPS) + 1;
+
+   stereo_filter_delay.samples      = (int32_t *)malloc(
+         initial_samples_size * sizeof(int32_t));
+   stereo_filter_delay.samples_size = initial_samples_size;
+   stereo_filter_delay.samples_pos  = 0;
+
+   /* Assign function pointer */
+   stereo_filter_apply = stereo_filter_apply_delay;
+}
+
+static void stereo_filter_deinit(void)
+{
+   /* Clean up */
+   stereo_filter_deinit_delay();
+   /* Assign default function pointer */
+   stereo_filter_apply = stereo_filter_apply_null;
+}
+
+static void stereo_filter_init(void)
+{
+   stereo_filter_deinit();
+
+   /* Use a case statement to simplify matters
+    * if more filter types are added in the
+    * future... */
+   switch (current_stereo_filter)
+   {
+      case STEREO_FILTER_DELAY:
+         stereo_filter_init_delay();
+         break;
+      default:
+         break;
+   }
+}
+
+/* ========================================
+ * Stereo Filter END
+ * ======================================== */
+
 #ifdef HAVE_NTSC_FILTER
 /* ntsc */
 #include "nes_ntsc.h"
@@ -683,10 +1038,10 @@ struct st_palettes palettes[] = {
 #define NTSC_RGB        3
 #define NTSC_MONOCHROME 4
 
-#define NTSC_WIDTH      602
+#define NES_NTSC_WIDTH  (((NES_NTSC_OUT_WIDTH(256) + 3) >> 2) << 2)
 
 static unsigned use_ntsc = 0;
-static unsigned burst_phase;
+static unsigned burst_phase = 0;
 static nes_ntsc_t nes_ntsc;
 static nes_ntsc_setup_t ntsc_setup;
 static uint16_t *ntsc_video_out = NULL; /* for ntsc blit buffer */
@@ -696,13 +1051,16 @@ static void NTSCFilter_Cleanup(void)
    if (ntsc_video_out)
       free(ntsc_video_out);
    ntsc_video_out = NULL;
+
+   use_ntsc = 0;
+   burst_phase = 0;
 }
 
 static void NTSCFilter_Init(void)
 {
    memset(&nes_ntsc, 0, sizeof(nes_ntsc));
    memset(&ntsc_setup, 0, sizeof(ntsc_setup));
-   ntsc_video_out = (uint16_t *)malloc(NTSC_WIDTH * NES_HEIGHT * sizeof(uint16_t));
+   ntsc_video_out = (uint16_t *)malloc(NES_NTSC_WIDTH * NES_HEIGHT * sizeof(uint16_t));
 }
 
 static void NTSCFilter_Setup(void)
@@ -813,20 +1171,24 @@ static void update_nes_controllers(unsigned port, unsigned device)
       switch (device)
       {
       case RETRO_DEVICE_FC_ARKANOID:
-         FCEUI_SetInputFC(SIFC_ARKANOID, &nes_input.FamicomData, 0);
+         FCEUI_SetInputFC(SIFC_ARKANOID, nes_input.FamicomData, 0);
          FCEU_printf(" Famicom Expansion: Arkanoid\n");
          break;
       case RETRO_DEVICE_FC_SHADOW:
-         FCEUI_SetInputFC(SIFC_SHADOW, &nes_input.FamicomData, 1);
+         FCEUI_SetInputFC(SIFC_SHADOW, nes_input.FamicomData, 1);
          FCEU_printf(" Famicom Expansion: (Bandai) Hyper Shot\n");
          break;
       case RETRO_DEVICE_FC_OEKAKIDS:
-         FCEUI_SetInputFC(SIFC_OEKAKIDS, &nes_input.FamicomData, 1);
+         FCEUI_SetInputFC(SIFC_OEKAKIDS, nes_input.FamicomData, 1);
          FCEU_printf(" Famicom Expansion: Oeka Kids Tablet\n");
          break;
       case RETRO_DEVICE_FC_4PLAYERS:
          FCEUI_SetInputFC(SIFC_4PLAYER, &nes_input.JSReturn, 0);
          FCEU_printf(" Famicom Expansion: Famicom 4-Player Adapter\n");
+         break;
+      case RETRO_DEVICE_FC_HYPERSHOT:
+         FCEUI_SetInputFC(SIFC_HYPERSHOT, nes_input.FamicomData, 0);
+         FCEU_printf(" Famicom Expansion: Konami Hyper Shot\n");
          break;
       case RETRO_DEVICE_NONE:
       default:
@@ -870,6 +1232,8 @@ static unsigned fc_to_libretro(int d)
       return RETRO_DEVICE_FC_OEKAKIDS;
    case SIFC_4PLAYER:
       return RETRO_DEVICE_FC_4PLAYERS;
+   case SIFC_HYPERSHOT:
+      return RETRO_DEVICE_FC_HYPERSHOT;
    }
 
    return (RETRO_DEVICE_NONE);
@@ -927,28 +1291,208 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
    }
 }
 
+/* Core options 'update display' callback */
+static bool update_option_visibility(void)
+{
+   struct retro_variable var = {0};
+   bool updated              = false;
+   size_t i, size;
+
+   /* If frontend supports core option categories,
+    * then fceumm_show_adv_system_options and
+    * fceumm_show_adv_sound_options are ignored
+    * and no options should be hidden */
+   if (libretro_supports_option_categories)
+      return false;
+
+   var.key = "fceumm_show_adv_system_options";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      bool opt_showAdvSystemOptions_prev = opt_showAdvSystemOptions;
+
+      opt_showAdvSystemOptions = true;
+      if (strcmp(var.value, "disabled") == 0)
+         opt_showAdvSystemOptions = false;
+
+      if (opt_showAdvSystemOptions != opt_showAdvSystemOptions_prev)
+      {
+         struct retro_core_option_display option_display;
+         unsigned i;
+         unsigned size;
+         char options_list[][25] = {
+            "fceumm_overclocking",
+            "fceumm_ramstate",
+            "fceumm_nospritelimit",
+            "fceumm_up_down_allowed",
+            "fceumm_show_crosshair"
+         };
+
+         option_display.visible = opt_showAdvSystemOptions;
+         size = sizeof(options_list) / sizeof(options_list[0]);
+         for (i = 0; i < size; i++)
+         {
+            option_display.key = options_list[i];
+            environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY,
+                  &option_display);
+         }
+
+         updated = true;
+      }
+   }
+
+   var.key = "fceumm_show_adv_sound_options";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      bool opt_showAdvSoundOptions_prev = opt_showAdvSoundOptions;
+
+      opt_showAdvSoundOptions = true;
+      if (strcmp(var.value, "disabled") == 0)
+         opt_showAdvSoundOptions = false;
+
+      if (opt_showAdvSoundOptions != opt_showAdvSoundOptions_prev)
+      {
+         struct retro_core_option_display option_display;
+         unsigned i;
+         unsigned size;
+         char options_list[][25] = {
+            "fceumm_sndvolume",
+            "fceumm_sndquality",
+            "fceumm_sndlowpass",
+            "fceumm_sndstereodelay",
+            "fceumm_swapduty",
+            "fceumm_apu_1",
+            "fceumm_apu_2",
+            "fceumm_apu_3",
+            "fceumm_apu_4",
+            "fceumm_apu_5"
+         };
+
+         option_display.visible  = opt_showAdvSoundOptions;
+         size = sizeof(options_list) / sizeof(options_list[0]);
+         for (i = 0; i < size; i++)
+         {
+            option_display.key = options_list[i];
+            environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY,
+                  &option_display);
+         }
+
+         updated = true;
+      }
+   }
+
+   return updated;
+}
+
 static void set_variables(void)
 {
+   struct retro_core_option_display option_display;
    unsigned i = 0, index = 0;
 
+   option_display.visible = false;
+
    /* Initialize main core option struct */
-   for (i = 0; i < MAX_CORE_OPTIONS; i++)
-      option_defs_us[i] = option_defs_empty;
+   memset(&option_defs_us, 0, sizeof(option_defs_us));
 
    /* Write common core options to main struct */
-   while (option_defs_common[index].key) {
-      option_defs_us[index] = option_defs_common[index];
+   while (option_defs[index].key) {
+      memcpy(&option_defs_us[index], &option_defs[index],
+            sizeof(struct retro_core_option_v2_definition));
       index++;
    }
    /* Append dipswitch settings to core options if available */
-   index += set_dipswitch_variables(index, option_defs_us);
-   option_defs_us[index] = option_defs_empty;
+   set_dipswitch_variables(index, option_defs_us);
 
-   libretro_set_core_options(environ_cb);
+   libretro_supports_option_categories = false;
+   libretro_set_core_options(environ_cb,
+         &libretro_supports_option_categories);
+
+   /* If frontend supports core option categories,
+    * fceumm_show_adv_system_options and
+    * fceumm_show_adv_sound_options are unused
+    * and should be hidden */
+   if (libretro_supports_option_categories)
+   {
+      option_display.key = "fceumm_show_adv_system_options";
+
+      environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY,
+            &option_display);
+
+      option_display.key = "fceumm_show_adv_sound_options";
+
+      environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY,
+            &option_display);
+   }
+   /* If frontend does not support core option
+    * categories, core options may be shown/hidden
+    * at runtime. In this case, register 'update
+    * display' callback, so frontend can update
+    * core options menu without calling retro_run() */
+   else
+   {
+      struct retro_core_options_update_display_callback update_display_cb;
+      update_display_cb.callback = update_option_visibility;
+
+      environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK,
+            &update_display_cb);
+   }
+
+   /* VS UNISystem games use internal palette regardless
+    * of user setting, so hide fceumm_palette option */
+   if (GameInfo && (GameInfo->type == GIT_VSUNI))
+   {
+      option_display.key = "fceumm_palette";
+
+      environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY,
+            &option_display);
+
+      /* Additionally disable gamepad palette
+       * switching */
+      palette_switch_enabled = false;
+   }
+}
+
+/* Game Genie add-on must be enabled before
+ * loading content, so we cannot parse this
+ * option inside check_variables() */
+static void check_game_genie_variable(void)
+{
+   struct retro_variable var = {0};
+   int game_genie_enabled    = 0;
+
+   var.key = "fceumm_game_genie";
+
+   /* Game Genie is only enabled for regular
+    * cartridges (excludes arcade content,
+    * FDS games, etc.) */
+   if ((GameInfo->type == GIT_CART) &&
+       (iNESCart.mapper != 105) && /* Nintendo World Championship cart (Mapper 105)*/
+       environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) &&
+       var.value &&
+       !strcmp(var.value, "enabled"))
+      game_genie_enabled = 1;
+
+   FCEUI_SetGameGenie(game_genie_enabled);
+}
+
+/* Callback passed to FCEUI_LoadGame()
+ * > Required since we must set and check
+ *   core options immediately after ROM
+ *   is loaded, before FCEUI_LoadGame()
+ *   returns */
+static void frontend_post_load_init()
+{
+   set_variables();
+   check_game_genie_variable();
 }
 
 void retro_set_environment(retro_environment_t cb)
 {
+   struct retro_vfs_interface_info vfs_iface_info;
+
    static const struct retro_controller_description pads1[] = {
       { "Auto",    RETRO_DEVICE_AUTO },
       { "Gamepad", RETRO_DEVICE_GAMEPAD },
@@ -980,6 +1524,7 @@ void retro_set_environment(retro_environment_t cb)
       { "Auto",                  RETRO_DEVICE_FC_AUTO },
       { "Arkanoid",              RETRO_DEVICE_FC_ARKANOID },
       { "(Bandai) Hyper Shot",   RETRO_DEVICE_FC_SHADOW },
+      { "(Konami) Hyper Shot",   RETRO_DEVICE_FC_HYPERSHOT },
       { "Oeka Kids Tablet",      RETRO_DEVICE_FC_OEKAKIDS },
       { "4-Player Adapter",      RETRO_DEVICE_FC_4PLAYERS },
       { 0, 0 },
@@ -990,17 +1535,35 @@ void retro_set_environment(retro_environment_t cb)
       { pads2, 4 },
       { pads3, 2 },
       { pads4, 2 },
-      { pads5, 5 },
+      { pads5, 6 },
       { 0, 0 },
    };
 
+   static const struct retro_system_content_info_override content_overrides[] = {
+      {
+         "fds|nes|unf|unif", /* extensions */
+         false,              /* need_fullpath */
+         false               /* persistent_data */
+      },
+      { NULL, false, false }
+   };
+
    environ_cb = cb;
+
    environ_cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*)ports);
+
+   vfs_iface_info.required_interface_version = 1;
+   vfs_iface_info.iface                      = NULL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VFS_INTERFACE, &vfs_iface_info))
+      filestream_vfs_init(&vfs_iface_info);
+
+   environ_cb(RETRO_ENVIRONMENT_SET_CONTENT_INFO_OVERRIDE,
+         (void*)content_overrides);
 }
 
 void retro_get_system_info(struct retro_system_info *info)
 {
-   info->need_fullpath    = false;
+   info->need_fullpath    = true;
    info->valid_extensions = "fds|nes|unf|unif";
 #ifdef GIT_VERSION
    info->library_version  = "(SVN)" GIT_VERSION;
@@ -1011,30 +1574,40 @@ void retro_get_system_info(struct retro_system_info *info)
    info->block_extract    = false;
 }
 
+static float get_aspect_ratio(unsigned width, unsigned height)
+{
+  if (aspect_ratio_par == 2)
+    return NES_4_3;
+  else if (aspect_ratio_par == 3)
+    return NES_PP;
+  else
+    return NES_8_7_PAR;
+}
+
 void retro_get_system_av_info(struct retro_system_av_info *info)
 {
 #ifdef PSP
-   unsigned width  = NES_WIDTH - (use_overscan ? 16 : 0);
-   unsigned height = NES_HEIGHT - (use_overscan ? 16 : 0);
+   unsigned width  = NES_WIDTH  - (crop_overscan ? 16 : 0);
+   unsigned height = NES_HEIGHT - (crop_overscan ? 16 : 0);
 #else
-   unsigned width  = NES_WIDTH - (overscan_h ? 16 : 0);
-   unsigned height = NES_HEIGHT - (overscan_v ? 16 : 0);
+   unsigned width  = NES_WIDTH  - (crop_overscan_h ? 16 : 0);
+   unsigned height = NES_HEIGHT - (crop_overscan_v ? 16 : 0);
 #endif
 #ifdef HAVE_NTSC_FILTER
    info->geometry.base_width = (use_ntsc ? NES_NTSC_OUT_WIDTH(width) : width);
-   info->geometry.max_width = (use_ntsc ? NTSC_WIDTH : NES_WIDTH);
+   info->geometry.max_width = (use_ntsc ? NES_NTSC_WIDTH : NES_WIDTH);
 #else
    info->geometry.base_width = width;
    info->geometry.max_width = NES_WIDTH;
 #endif
    info->geometry.base_height = height;
    info->geometry.max_height = NES_HEIGHT;
-   info->geometry.aspect_ratio = (float)(use_par ? NES_8_7_PAR : NES_4_3);
+   info->geometry.aspect_ratio = get_aspect_ratio(width, height);
    info->timing.sample_rate = (float)sndsamplerate;
    if (FSettings.PAL || dendy)
-      info->timing.fps = 838977920.0/16777215.0;
+      info->timing.fps = NES_PAL_FPS;
    else
-      info->timing.fps = 1008307711.0/16777215.0;
+      info->timing.fps = NES_NTSC_FPS;
 }
 
 static void check_system_specs(void)
@@ -1047,20 +1620,18 @@ static void check_system_specs(void)
 void retro_init(void)
 {
    bool achievements = true;
-   enum retro_pixel_format rgb565;
    log_cb.log=default_logger;
    environ_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log_cb);
 
    environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, &achievements);
 
-#ifdef FRONTEND_SUPPORTS_RGB565
-   rgb565 = RETRO_PIXEL_FORMAT_RGB565;
-   if(environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &rgb565))
-      log_cb.log(RETRO_LOG_INFO, "Frontend supports RGB565 - will use that instead of XRGB1555.\n");
-#endif
-
    if (environ_cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, NULL))
       libretro_supports_bitmasks = true;
+
+   environ_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION,
+         &libretro_msg_interface_version);
+
+   palette_switch_init();
 }
 
 static void retro_set_custom_palette(void)
@@ -1119,7 +1690,7 @@ static void retro_set_custom_palette(void)
  * Dendy has PAL framerate and resolution, but ~NTSC timings,
  * and has 50 dummy scanlines to force 50 fps.
  */
-void FCEUD_RegionOverride(unsigned region)
+static void FCEUD_RegionOverride(unsigned region)
 {
    unsigned pal = 0;
    unsigned d = 0;
@@ -1131,21 +1702,19 @@ void FCEUD_RegionOverride(unsigned region)
          pal = systemRegion & 1;
          break;
       case 1: /* ntsc */
-         FCEU_DispMessage("System: NTSC");
+         FCEUD_DispMessage(RETRO_LOG_INFO, 2000, "System: NTSC");
          break;
       case 2: /* pal */
          pal = 1;
-         FCEU_DispMessage("System: PAL");
+         FCEUD_DispMessage(RETRO_LOG_INFO, 2000, "System: PAL");
          break;
       case 3: /* dendy */
          d = 1;
-         FCEU_DispMessage("System: Dendy");
+         FCEUD_DispMessage(RETRO_LOG_INFO, 2000, "System: Dendy");
          break;
    }
 
    dendy = d;
-   normal_scanlines = dendy ? 290 : 240;
-   totalscanlines = normal_scanlines + (overclock_enabled ? extrascanlines : 0);
    FCEUI_SetVidSystem(pal);
    ResetPalette();
 }
@@ -1166,10 +1735,13 @@ void retro_deinit (void)
    ps2 = NULL;
 #endif
    libretro_supports_bitmasks = false;
+   libretro_msg_interface_version = 0;
    DPSW_Cleanup();
 #ifdef HAVE_NTSC_FILTER
    NTSCFilter_Cleanup();
 #endif
+   palette_switch_deinit();
+   stereo_filter_deinit();
 }
 
 void retro_reset(void)
@@ -1189,9 +1761,9 @@ static void set_apu_channels(int chan)
 static void check_variables(bool startup)
 {
    struct retro_variable var = {0};
-   bool palette_updated = false;
    char key[256];
    int i, enable_apu;
+   bool stereo_filter_updated = false;
 
    /* 1 = Performs only geometry update: e.g. overscans */
    /* 2 = Performs video/geometry update when needed and timing changes: e.g. region and filter change */
@@ -1358,9 +1930,6 @@ static void check_variables(bool startup)
       FCEU_ZapperSetTolerance(atoi(var.value));
    }
 
-   var.key = "fceumm_region";
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-
    var.key = "fceumm_show_crosshair";
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -1374,23 +1943,22 @@ static void check_variables(bool startup)
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
-      bool newval = (!strcmp(var.value, "disabled"));
-      if (newval != use_overscan)
+      bool newval = (!strcmp(var.value, "enabled"));
+      if (newval != crop_overscan)
       {
-         use_overscan = newval;
+         crop_overscan = newval;
          audio_video_updated = 1;
       }
    }
-
 #else
    var.key = "fceumm_overscan_h";
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       bool newval = (!strcmp(var.value, "enabled"));
-      if (newval != overscan_h)
+      if (newval != crop_overscan_h)
       {
-         overscan_h = newval;
+         crop_overscan_h = newval;
          audio_video_updated = 1;
       }
    }
@@ -1400,23 +1968,28 @@ static void check_variables(bool startup)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       bool newval = (!strcmp(var.value, "enabled"));
-      if (newval != overscan_v)
+      if (newval != crop_overscan_v)
       {
-         overscan_v = newval;
+         crop_overscan_v = newval;
          audio_video_updated = 1;
       }
    }
 #endif
+
    var.key = "fceumm_aspect";
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
-      bool newval = (!strcmp(var.value, "8:7 PAR"));
-      if (newval != use_par)
-      {
-         use_par = newval;
-         audio_video_updated = 1;
+      unsigned oldval = aspect_ratio_par;
+      if (!strcmp(var.value, "8:7 PAR")) {
+        aspect_ratio_par = 1;
+      } else if (!strcmp(var.value, "4:3")) {
+        aspect_ratio_par = 2;
+      } else if (!strcmp(var.value, "PP")) {
+        aspect_ratio_par = 3;
       }
+     if (aspect_ratio_par != oldval)
+       audio_video_updated = 1;
    }
 
    var.key = "fceumm_turbo_enable";
@@ -1443,6 +2016,7 @@ static void check_variables(bool startup)
       nes_input.turbo_delay = atoi(var.value);
 
    var.key = "fceumm_region";
+
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       unsigned oldval = opt_region;
@@ -1475,6 +2049,53 @@ static void check_variables(bool startup)
       if (sndquality != oldval)
          FCEUI_SetSoundQuality(sndquality);
    }
+
+   var.key = "fceumm_sndlowpass";
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      int lowpass = (!strcmp(var.value, "enabled")) ? 1 : 0;
+      FCEUI_SetLowPass(lowpass);
+   }
+
+   var.key = "fceumm_sndstereodelay";
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      enum stereo_filter_type filter_type = STEREO_FILTER_NULL;
+      float filter_delay_ms               = STEREO_FILTER_DELAY_MS_DEFAULT;
+
+      if (strcmp(var.value, "disabled") &&
+          (strlen(var.value) > 1))
+      {
+         char value_str[3];
+
+         value_str[0] = var.value[0];
+         value_str[1] = var.value[1];
+         value_str[2] = '\0';
+
+         filter_type     = STEREO_FILTER_DELAY;
+         filter_delay_ms = (float)atoi(var.value);
+
+         filter_delay_ms = (filter_delay_ms < 1.0f) ?
+               1.0f : filter_delay_ms;
+         filter_delay_ms = (filter_delay_ms > 32.0f) ?
+               32.0f : filter_delay_ms;
+      }
+
+      if ((filter_type != current_stereo_filter) ||
+          ((filter_type == STEREO_FILTER_DELAY) &&
+               (filter_delay_ms != stereo_filter_delay_ms)))
+      {
+         current_stereo_filter  = filter_type;
+         stereo_filter_delay_ms = filter_delay_ms;
+         stereo_filter_updated  = true;
+      }
+   }
+
+   if ((stereo_filter_updated ||
+         (audio_video_updated == 2)) && !startup)
+      stereo_filter_init();
 
    var.key = "fceumm_sndvolume";
 
@@ -1520,68 +2141,7 @@ static void check_variables(bool startup)
 
    update_dipswitch();
 
-   var.key = "fceumm_show_adv_system_options";
-   var.value = NULL;
-
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-   {
-      unsigned newval = (!strcmp(var.value, "enabled")) ? 1 : 0;
-      if ((opt_showAdvSystemOptions != newval) || startup)
-      {
-         struct retro_core_option_display option_display;
-         unsigned i;
-         unsigned size;
-         char options_list[][25] = {
-            "fceumm_overclocking",
-            "fceumm_ramstate",
-            "fceumm_nospritelimit",
-            "fceumm_up_down_allowed",
-            "fceumm_show_crosshair"
-         };
-
-         opt_showAdvSystemOptions = newval;
-         option_display.visible = opt_showAdvSystemOptions;
-         size = sizeof(options_list) / sizeof(options_list[0]);
-         for (i = 0; i < size; i++)
-         {
-            option_display.key = options_list[i];
-            environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
-         }
-      }
-   }
-
-   var.key = "fceumm_show_adv_sound_options";
-   var.value = NULL;
-
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-   {
-      unsigned newval = (!strcmp(var.value, "enabled")) ? 1 : 0;
-      if ((opt_showAdvSoundOptions != newval) || startup)
-      {
-         struct retro_core_option_display option_display;
-         unsigned i;
-         unsigned size;
-         char options_list[][25] = {
-            "fceumm_sndvolume",
-            "fceumm_sndquality",
-            "fceumm_swapduty",
-            "fceumm_apu_1",
-            "fceumm_apu_2",
-            "fceumm_apu_3",
-            "fceumm_apu_4",
-            "fceumm_apu_5"
-         };
-
-         opt_showAdvSoundOptions = newval;
-         option_display.visible  = opt_showAdvSoundOptions;
-         size = sizeof(options_list) / sizeof(options_list[0]);
-         for (i = 0; i < size; i++)
-         {
-            option_display.key = options_list[i];
-            environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
-         }
-      }
-   }
+   update_option_visibility();
 }
 
 static int mzx = 0, mzy = 0;
@@ -1593,10 +2153,10 @@ void get_mouse_input(unsigned port, uint32_t *zapdata)
    int min_width, min_height, max_width, max_height;
 
 #ifdef PSP
-   adjx = adjy = use_overscan ? 1 : 0;
+   adjx = adjy = crop_overscan ? 1 : 0;
 #else
-   adjx        = overscan_h ? 1 : 0;
-   adjy        = overscan_v ? 1 : 0;
+   adjx        = crop_overscan_h ? 1 : 0;
+   adjy        = crop_overscan_v ? 1 : 0;
 #endif
    max_width   = 256;
    max_height  = 240;
@@ -1683,6 +2243,8 @@ void get_mouse_input(unsigned port, uint32_t *zapdata)
 static void FCEUD_UpdateInput(void)
 {
    unsigned player, port;
+   bool palette_prev = false;
+   bool palette_next = false;
 
    poll_cb();
 
@@ -1694,7 +2256,8 @@ static void FCEUD_UpdateInput(void)
    {
       int i              = 0;
       uint8_t input_buf  = 0;
-      int player_enabled = (nes_input.type[player] == RETRO_DEVICE_GAMEPAD) || (nes_input.type[player] == RETRO_DEVICE_JOYPAD);
+      int player_enabled = (nes_input.type[player] == RETRO_DEVICE_GAMEPAD) ||
+            (nes_input.type[player] == RETRO_DEVICE_JOYPAD);
 
       if (player_enabled)
       {
@@ -1702,34 +2265,72 @@ static void FCEUD_UpdateInput(void)
 
          if (libretro_supports_bitmasks)
          {
+            bool dpad_enabled = true;
+
             ret = input_cb(player, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK);
+
+            /* If palette switching is enabled, check if
+             * player 1 has the L2 button held down */
+            if ((player == 0) &&
+                palette_switch_enabled &&
+                (ret & (1 << RETRO_DEVICE_ID_JOYPAD_L2)))
+            {
+               /* D-Pad left/right are used to switch palettes */
+               palette_prev = (bool)(ret & (1 << RETRO_DEVICE_ID_JOYPAD_LEFT));
+               palette_next = (bool)(ret & (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT));
+
+               /* Regular D-Pad input is disabled */
+               dpad_enabled = false;
+            }
 
             if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_A))
                input_buf |= JOY_A;
             if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_B))
                input_buf |= JOY_B;
+            if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_L3))
+               input_buf |= JOY_A | JOY_B;
             if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_SELECT))
                input_buf |= JOY_SELECT;
             if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_START))
                input_buf |= JOY_START;
-            if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_UP))
-               input_buf |= JOY_UP;
-            if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_DOWN))
-               input_buf |= JOY_DOWN;
-            if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_LEFT))
-               input_buf |= JOY_LEFT;
-            if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT))
-               input_buf |= JOY_RIGHT;
+
+            if (dpad_enabled)
+            {
+               if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_UP))
+                  input_buf |= JOY_UP;
+               if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_DOWN))
+                  input_buf |= JOY_DOWN;
+               if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_LEFT))
+                  input_buf |= JOY_LEFT;
+               if (ret & (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT))
+                  input_buf |= JOY_RIGHT;
+            }
          }
          else
          {
             for (i = 0; i < MAX_BUTTONS; i++)
                input_buf |= input_cb(player, RETRO_DEVICE_JOYPAD, 0,
                      bindmap[i].retro) ? bindmap[i].nes : 0;
+
+            /* If palette switching is enabled, check if
+             * player 1 has the L2 button held down */
+            if ((player == 0) &&
+                palette_switch_enabled &&
+                input_cb(player, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))
+            {
+               /* D-Pad left/right are used to switch palettes */
+               palette_prev = (bool)(input_buf & JOY_LEFT);
+               palette_next = (bool)(input_buf & JOY_RIGHT);
+
+               /* Regular D-Pad input is disabled */
+               input_buf &= ~(JOY_UP | JOY_DOWN | JOY_LEFT | JOY_RIGHT);
+            }
          }
 
          /* Turbo A and Turbo B buttons are
           * mapped to Joypad X and Joypad Y
+          * in RetroArch joypad.
+          * Turbo A+B button is mapped to R3
           * in RetroArch joypad.
           *
           * We achieve this by keeping track of
@@ -1737,14 +2338,21 @@ static void FCEUD_UpdateInput(void)
           * the toggle counter and fire or not fire
           * depending on whether the delay value has
           * been reached.
+          *
+          * Each turbo button is activated by
+          * corresponding mapped button
+          * OR mapped Turbo A+B button.
+          * This allows Turbo A+B button to use
+          * the same toggle counters as Turbo A
+          * and Turbo B buttons use separately.
           */
 
          if (nes_input.turbo_enabler[player])
          {
-            /* Handle Turbo A & B buttons */
+            /* Handle Turbo A, B & A+B buttons */
             for (i = 0; i < TURBO_BUTTONS; i++)
             {
-               if (input_cb(player, RETRO_DEVICE_JOYPAD, 0, turbomap[i].retro))
+               if (input_cb(player, RETRO_DEVICE_JOYPAD, 0, turbomap[i].retro) || input_cb(player, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3))
                {
                   if (!turbo_button_toggle[player][i])
                      input_buf |= turbomap[i].nes;
@@ -1760,12 +2368,10 @@ static void FCEUD_UpdateInput(void)
 
       if (!nes_input.up_down_allowed)
       {
-         if (input_buf & (JOY_UP))
-            if (input_buf & (JOY_DOWN))
-               input_buf &= ~((JOY_UP ) | (JOY_DOWN));
-         if (input_buf & (JOY_LEFT))
-            if (input_buf & (JOY_RIGHT))
-               input_buf &= ~((JOY_LEFT ) | (JOY_RIGHT));
+         if ((input_buf & JOY_UP) && (input_buf & JOY_DOWN))
+            input_buf &= ~(JOY_UP | JOY_DOWN);
+         if ((input_buf & JOY_LEFT) && (input_buf & JOY_RIGHT))
+            input_buf &= ~(JOY_LEFT | JOY_RIGHT);
       }
 
       nes_input.JSReturn |= (input_buf & 0xff) << (player << 3);
@@ -1789,8 +2395,39 @@ static void FCEUD_UpdateInput(void)
       case RETRO_DEVICE_FC_ARKANOID:
       case RETRO_DEVICE_FC_OEKAKIDS:
       case RETRO_DEVICE_FC_SHADOW:
-         get_mouse_input(0, &nes_input.FamicomData);
+         get_mouse_input(0, nes_input.FamicomData);
          break;
+      case RETRO_DEVICE_FC_HYPERSHOT:
+      {
+         static int toggle;
+         int i;
+
+         nes_input.FamicomData[0] = 0;
+         toggle ^= 1;
+         for (i = 0; i < 2; i++)
+         {
+
+            if (input_cb(i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B))
+               nes_input.FamicomData[0] |= 0x02 << (i * 2);
+            else if (input_cb(i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))
+            {
+               if (toggle)
+                  nes_input.FamicomData[0] |= 0x02 << (i * 2);
+               else
+                  nes_input.FamicomData[0] &= ~(0x02 << (i * 2));
+            }
+            if (input_cb(i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A))
+               nes_input.FamicomData[0] |= 0x04 << (i * 2);
+            else if (input_cb(i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X))
+            {
+               if (toggle)
+                  nes_input.FamicomData[0] |= 0x04 << (i * 2);
+               else
+                  nes_input.FamicomData[0] &= ~(0x04 << (i * 2));
+            }
+         }
+         break;
+      }
    }
 
    if (input_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))
@@ -1810,6 +2447,38 @@ static void FCEUD_UpdateInput(void)
          FCEU_FDSInsert(-1);        /* Insert or eject the disk */
       prevR = curR;
    }
+
+   /* Handle internal palette switching */
+   if (palette_prev || palette_next)
+   {
+      if (palette_switch_counter == 0)
+      {
+         int new_palette_index = palette_switch_get_current_index();
+
+         if (palette_prev)
+         {
+            if (new_palette_index > 0)
+               new_palette_index--;
+            else
+               new_palette_index = PAL_TOTAL - 1;
+         }
+         else /* palette_next */
+         {
+            if (new_palette_index < PAL_TOTAL - 1)
+               new_palette_index++;
+            else
+               new_palette_index = 0;
+         }
+
+         palette_switch_set_index(new_palette_index);
+      }
+
+      palette_switch_counter++;
+      if (palette_switch_counter >= PALETTE_SWITCH_PERIOD)
+         palette_switch_counter = 0;
+   }
+   else
+      palette_switch_counter = 0;
 }
 
 void FCEUD_Update(uint8 *XBuf, int32 *Buffer, int Count)
@@ -1829,7 +2498,7 @@ static void retro_run_blit(uint8_t *gfx)
    unsigned pitch  = 512;
 
 #ifdef PSP
-   if (!use_overscan)
+   if (crop_overscan)
    {
       width  -= 16;
       height -= 16;
@@ -1845,10 +2514,10 @@ static void retro_run_blit(uint8_t *gfx)
     * so we use GU_PSM_4444 ( 2 Bytes per pixel ) instead
     * with half the values for pitch / width / x offset
     */
-   if (use_overscan)
-      sceGuCopyImage(GU_PSM_4444, 0, 0, 128, 240, 128, XBuf, 0, 0, 128, texture_vram_p);
-   else
+   if (crop_overscan)
       sceGuCopyImage(GU_PSM_4444, 4, 4, 120, 224, 128, XBuf, 0, 0, 128, texture_vram_p);
+   else
+      sceGuCopyImage(GU_PSM_4444, 0, 0, 128, 240, 128, XBuf, 0, 0, 128, texture_vram_p);
 
    sceGuTexSync();
    sceGuTexImage(0, 256, 256, 256, texture_vram_p);
@@ -1866,12 +2535,12 @@ static void retro_run_blit(uint8_t *gfx)
 
    if (!ps2) {
       if (!environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, (void **)&ps2) || !ps2) {
-         printf("Failed to get HW rendering interface!\n");
+         FCEU_printf(" Failed to get HW rendering interface!\n");
          return;
       }
 
       if (ps2->interface_version != RETRO_HW_RENDER_INTERFACE_GSKIT_PS2_VERSION) {
-         printf("HW render interface mismatch, expected %u, got %u!\n",
+         FCEU_printf(" HW render interface mismatch, expected %u, got %u!\n",
                   RETRO_HW_RENDER_INTERFACE_GSKIT_PS2_VERSION, ps2->interface_version);
          return;
       }
@@ -1881,10 +2550,10 @@ static void retro_run_blit(uint8_t *gfx)
       ps2->coreTexture->PSM = GS_PSM_T8;
       ps2->coreTexture->ClutPSM = GS_PSM_CT16;
       ps2->coreTexture->Filter = GS_FILTER_LINEAR;
-      ps2->padding = (struct retro_hw_ps2_insets){ overscan_v ? 8.0f : 0.0f,
-                                                   overscan_h ? 8.0f : 0.0f,
-                                                   overscan_v ? 8.0f : 0.0f,
-                                                   overscan_h ? 8.0f : 0.0f};
+      ps2->padding = (struct retro_hw_ps2_insets){ crop_overscan_v ? 8.0f : 0.0f,
+                                                   crop_overscan_h ? 8.0f : 0.0f,
+                                                   crop_overscan_v ? 8.0f : 0.0f,
+                                                   crop_overscan_h ? 8.0f : 0.0f};
    }
 
    ps2->coreTexture->Clut = (u32*)retro_palette;
@@ -1895,43 +2564,42 @@ static void retro_run_blit(uint8_t *gfx)
 #ifdef HAVE_NTSC_FILTER
    if (use_ntsc)
    {
-      int h_offset, v_offset;
-
       burst_phase ^= 1;
       if (ntsc_setup.merge_fields)
          burst_phase = 0;
 
       nes_ntsc_blit(&nes_ntsc, (NES_NTSC_IN_T const*)gfx, (NES_NTSC_IN_T *)XDBuf,
           NES_WIDTH, burst_phase, NES_WIDTH, NES_HEIGHT,
-          ntsc_video_out, NTSC_WIDTH * sizeof(uint16));
+          ntsc_video_out, NES_NTSC_WIDTH * sizeof(uint16));
 
-      h_offset = overscan_h ?  NES_NTSC_OUT_WIDTH(8) : 0;
-      v_offset = overscan_v ? 8 : 0;
-      width    = overscan_h ? 560 : 602;
-      height   = overscan_v ? 224 : 240;
+      width    = NES_WIDTH - (crop_overscan_h ? 16 : 0);
+      width    = NES_NTSC_OUT_WIDTH(width);
+      height   = NES_HEIGHT - (crop_overscan_v ? 16 : 0);
       pitch    = width * sizeof(uint16_t);
 
       {
-         const uint16_t *in = ntsc_video_out + h_offset + NTSC_WIDTH * v_offset;
-         uint16_t *out = fceu_video_out;
-         int y;
+         int32_t h_offset   = crop_overscan_h ?  NES_NTSC_OUT_WIDTH(8) : 0;
+         int32_t v_offset   = crop_overscan_v ? 8 : 0;
+         const uint16_t *in = ntsc_video_out + h_offset + NES_NTSC_WIDTH * v_offset;
+         uint16_t *out      = fceu_video_out;
 
          for (y = 0; y < height; y++)
          {
-            memcpy(out, in, width * sizeof(uint16_t));
-            in += NTSC_WIDTH;
+            memcpy(out, in, pitch);
+            in += NES_NTSC_WIDTH;
             out += width;
          }
       }
+      video_cb(fceu_video_out, width, height, pitch);
    }
    else
 #endif /* HAVE_NTSC_FILTER */
    {
-      incr   += (overscan_h ? 16 : 0);
-      width  -= (overscan_h ? 16 : 0);
-      height -= (overscan_v ? 16 : 0);
-      pitch  -= (overscan_h ? 32 : 0);
-      gfx    += (overscan_v ? ((overscan_h ? 8 : 0) + 256 * 8) : (overscan_h ? 8 : 0));
+      incr   += (crop_overscan_h ? 16 : 0);
+      width  -= (crop_overscan_h ? 16 : 0);
+      height -= (crop_overscan_v ? 16 : 0);
+      pitch  -= (crop_overscan_h ? 32 : 0);
+      gfx    += (crop_overscan_v ? ((crop_overscan_h ? 8 : 0) + 256 * 8) : (crop_overscan_h ? 8 : 0));
 
       if (use_raw_palette)
       {
@@ -1946,16 +2614,15 @@ static void retro_run_blit(uint8_t *gfx)
             for (x = 0; x < width; x++, gfx++)
                fceu_video_out[y * width + x] = retro_palette[*gfx];
       }
+      video_cb(fceu_video_out, width, height, pitch);
    }
-   video_cb(fceu_video_out, width, height, pitch);
 #endif
 }
 
 void retro_run(void)
 {
-   unsigned i;
    uint8_t *gfx;
-   int32_t ssize = 0;
+   int32_t i, ssize = 0;
    bool updated = false;
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
@@ -1966,12 +2633,10 @@ void retro_run(void)
    FCEUD_UpdateInput();
    FCEUI_Emulate(&gfx, &sound, &ssize, 0);
 
-   for (i = 0; i < ssize; i++)
-      sound[i] = (sound[i] << 16) | (sound[i] & 0xffff);
-
-   audio_batch_cb((const int16_t*)sound, ssize);
-
    retro_run_blit(gfx);
+
+   stereo_filter_apply(sound, ssize);
+   audio_batch_cb((const int16_t*)sound, ssize);
 }
 
 size_t retro_serialize_size(void)
@@ -1992,6 +2657,11 @@ size_t retro_serialize_size(void)
 
 bool retro_serialize(void *data, size_t size)
 {
+   /* Cannot save state while Game Genie
+    * screen is open */
+   if (geniestage == 1)
+      return false;
+
    if (size != retro_serialize_size())
       return false;
 
@@ -2002,6 +2672,11 @@ bool retro_serialize(void *data, size_t size)
 
 bool retro_unserialize(const void * data, size_t size)
 {
+   /* Cannot load state while Game Genie
+    * screen is open */
+   if (geniestage == 1)
+      return false;
+
    if (size != retro_serialize_size())
       return false;
 
@@ -2024,7 +2699,7 @@ static int checkGG(char c)
 static int GGisvalid(const char *code)
 {
    size_t len = strlen(code);
-   int i;
+   uint32 i;
 
    if (len != 6 && len != 8)
       return 0;
@@ -2049,7 +2724,6 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
    uint8  v;
    int    c;
    int    type = 1;
-   int    ret = 0;
 
    if (code == NULL)
       return;
@@ -2365,77 +3039,180 @@ static const struct cartridge_db famicom_4p_db_list[] =
    }
 };
 
-#ifdef _WIN32
-static char slash = '\\';
-#else
-static char slash = '/';
-#endif
-
-
-bool retro_load_game(const struct retro_game_info *game)
+bool retro_load_game(const struct retro_game_info *info)
 {
    unsigned i, j;
-   char* dir=NULL;
-   char* sav_dir=NULL;
+   const char *system_dir = NULL;
    size_t fourscore_len = sizeof(fourscore_db_list)   / sizeof(fourscore_db_list[0]);
    size_t famicom_4p_len = sizeof(famicom_4p_db_list) / sizeof(famicom_4p_db_list[0]);
+   enum retro_pixel_format rgb565;
 
    struct retro_input_descriptor desc[] = {
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "D-Pad Up" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "B" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "A" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,   "Select" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,    "Start" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "A+B" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
       { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,     "(VSSystem) Insert Coin" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,     "(FDS) Disk Side Change" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,     "(FDS) Insert/Eject Disk" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,     "Turbo A" },
-      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,     "Turbo B" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "(FDS) Disk Side Change" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "(FDS) Insert/Eject Disk" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Turbo A" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Turbo B" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Turbo A+B" },
 
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "D-Pad Up" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "B" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "A" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,   "Select" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,    "Start" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,     "Turbo A" },
-      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,     "Turbo B" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "A+B" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Turbo A" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Turbo B" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Turbo A+B" },
 
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "D-Pad Up" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "B" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "A" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,   "Select" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,    "Start" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,     "Turbo A" },
-      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,     "Turbo B" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "A+B" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Turbo A" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Turbo B" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Turbo A+B" },
 
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "D-Pad Up" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "B" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "A" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,   "Select" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,    "Start" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,     "Turbo A" },
-      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,     "Turbo B" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "A+B" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Turbo A" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Turbo B" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Turbo A+B" },
 
       { 0 },
    };
+
+   struct retro_input_descriptor desc_ps[] = { /* ps: palette switching */
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "A+B" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,     "Switch Palette (+ Left/Right)" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,     "(VSSystem) Insert Coin" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "(FDS) Disk Side Change" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "(FDS) Insert/Eject Disk" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Turbo A" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Turbo B" },
+      { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Turbo A+B" },
+
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "A+B" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Turbo A" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Turbo B" },
+      { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Turbo A+B" },
+
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "A+B" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Turbo A" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Turbo B" },
+      { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Turbo A+B" },
+
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-Pad Left" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-Pad Up" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-Pad Down" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,     "A+B" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Turbo A" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Turbo B" },
+      { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,     "Turbo A+B" },
+
+      { 0 },
+   };
+
    size_t desc_base = 64;
    struct retro_memory_descriptor descs[64 + 4];
    struct retro_memory_map        mmaps;
 
-   if (!game)
-      return false;
+   struct retro_game_info_ext *info_ext = NULL;
+   const uint8_t *content_data          = NULL;
+   size_t content_size                  = 0;
+   char content_path[2048]              = {0};
+
+   /* Attempt to fetch extended game info */
+   if (environ_cb(RETRO_ENVIRONMENT_GET_GAME_INFO_EXT, &info_ext) && info_ext)
+   {
+      content_data = (const uint8_t *)info_ext->data;
+      content_size = info_ext->size;
+
+      if (info_ext->file_in_archive)
+      {
+         /* We don't have a 'physical' file in this
+          * case, but the core still needs a filename
+          * in order to detect the region of iNES v1.0
+          * ROMs. We therefore fake it, using the content
+          * directory, canonical content name, and content
+          * file extension */
+         snprintf(content_path, sizeof(content_path), "%s%c%s.%s",
+               info_ext->dir,
+               PATH_DEFAULT_SLASH_C(),
+               info_ext->name,
+               info_ext->ext);
+      }
+      else
+         strlcpy(content_path, info_ext->full_path,
+               sizeof(content_path));
+   }
+   else
+   {
+      if (!info || string_is_empty(info->path))
+         return false;
+
+      strlcpy(content_path, info->path,
+            sizeof(content_path));
+   }
+
+#ifdef FRONTEND_SUPPORTS_RGB565
+   rgb565 = RETRO_PIXEL_FORMAT_RGB565;
+   if(environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &rgb565))
+      log_cb.log(RETRO_LOG_INFO, "Frontend supports RGB565 - will use that instead of XRGB1555.\n");
+#endif
 
    /* initialize some of the default variables */
 #ifdef GEKKO
@@ -2447,6 +3224,7 @@ bool retro_load_game(const struct retro_game_info *game)
    sndvolume = 150;
    swapDuty = 0;
    dendy = 0;
+   opt_region = 0;
 
    /* Wii: initialize this or else last variable is passed through
     * when loading another rom causing save state size change. */
@@ -2458,7 +3236,7 @@ bool retro_load_game(const struct retro_game_info *game)
    fceu_video_out = (uint16_t*)linearMemAlign(256 * 240 * sizeof(uint16_t), 128);
 #elif !defined(PSP)
 #ifdef HAVE_NTSC_FILTER
-#define FB_WIDTH NTSC_WIDTH
+#define FB_WIDTH NES_NTSC_WIDTH
 #define FB_HEIGHT NES_HEIGHT
 #else /* !HAVE_NTSC_FILTER */
 #define FB_WIDTH NES_WIDTH
@@ -2467,12 +3245,8 @@ bool retro_load_game(const struct retro_game_info *game)
    fceu_video_out = (uint16_t*)malloc(FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
 #endif
 
-   environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
-
-   if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir)
-      FCEUI_SetBaseDirectory(dir);
-   if (environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &sav_dir) && sav_dir)
-      FCEUI_SetSaveDirectory(sav_dir);
+   if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system_dir) && system_dir)
+      FCEUI_SetBaseDirectory(system_dir);
 
    memset(base_palette, 0, sizeof(base_palette));
 
@@ -2481,19 +3255,23 @@ bool retro_load_game(const struct retro_game_info *game)
    FCEUI_SetSoundVolume(sndvolume);
    FCEUI_Sound(sndsamplerate);
 
-   GameInfo = (FCEUGI*)FCEUI_LoadGame(game->path, (uint8_t*)game->data, game->size);
+   GameInfo = (FCEUGI*)FCEUI_LoadGame(content_path, content_data, content_size,
+         frontend_post_load_init);
+
    if (!GameInfo)
    {
-      struct retro_message msg;
-      char msg_local[256];
-
-      sprintf(msg_local, "ROM loading failed...");
-      msg.msg    = msg_local;
-      msg.frames = 360;
-      if (environ_cb)
-         environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, (void*)&msg);
+#if 0
+      /* An error message here is superfluous - the frontend
+       * will report that content loading has failed */
+      FCEUD_DispMessage(RETRO_LOG_ERROR, 3000, "ROM loading failed...");
+#endif
       return false;
    }
+
+   if (palette_switch_enabled)
+      environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc_ps);
+   else
+      environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
 
    for (i = 0; i < MAX_PORTS; i++) {
       FCEUI_SetInput(i, SI_GAMEPAD, &nes_input.JSReturn, 0);
@@ -2502,7 +3280,8 @@ bool retro_load_game(const struct retro_game_info *game)
 
    external_palette_exist = ipalette;
    if (external_palette_exist)
-      FCEU_printf(" Loading custom palette: %s%cnes.pal\n", dir, slash);
+      FCEU_printf(" Loading custom palette: %s%cnes.pal\n",
+            system_dir, PATH_DEFAULT_SLASH_C());
 
    /* Save region and dendy mode for region-auto detect */
    systemRegion = (dendy << 1) | (retro_get_region() & 1);
@@ -2511,8 +3290,8 @@ bool retro_load_game(const struct retro_game_info *game)
 
    ResetPalette();
    FCEUD_SoundToggle();
-   set_variables();
    check_variables(true);
+   stereo_filter_init();
    PowerNES();
 
 

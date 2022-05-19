@@ -85,7 +85,7 @@ static int SubWrite(memstream_t *mem, SFORMAT *sf)
 
    while(sf->v)
    {
-      if(sf->s == ~0) /* Link to another struct. */
+      if(sf->s == (~(uint32)0)) /* Link to another struct. */
       {
          uint32 tmp;
 
@@ -140,7 +140,7 @@ static SFORMAT *CheckS(SFORMAT *sf, uint32 tsize, char *desc)
 {
    while (sf->v)
    {
-      if (sf->s == ~0)
+      if (sf->s == (~(uint32)0))
       { /* Link to another SFORMAT structure. */
          SFORMAT *tmp;
          if ((tmp = CheckS((SFORMAT*)sf->v, tsize, desc)))
@@ -162,7 +162,7 @@ static SFORMAT *CheckS(SFORMAT *sf, uint32 tsize, char *desc)
 static int ReadStateChunk(memstream_t *mem, SFORMAT *sf, int size)
 {
    SFORMAT *tmp;
-   int temp;
+   uint64 temp;
    temp = memstream_pos(mem);
 
    while(memstream_pos(mem) < (temp + size))
@@ -286,6 +286,7 @@ void FCEUSS_Load_Mem(void)
 
    uint8 header[16];
    int stateversion;
+   int totalsize;
    int x;
 
    memstream_read(mem, header, 16);
@@ -297,8 +298,10 @@ void FCEUSS_Load_Mem(void)
       stateversion = FCEU_de32lsb(header + 8);
    else
       stateversion = header[3] * 100;
+   
+   totalsize = FCEU_de32lsb(header + 4);
 
-   x = ReadStateChunks(mem, *(uint32*)(header + 4));
+   x = ReadStateChunks(mem, totalsize);
 
    if (stateversion < 9500)
       X.IRQlow = 0;
@@ -325,6 +328,8 @@ void ResetExState(void (*PreSave)(void), void (*PostSave)(void))
 
 void AddExState(void *v, uint32 s, int type, char *desc)
 {
+   /* prevent adding a terminator to the list if a NULL pointer was provided */
+   if (v == NULL) return;
    memset(SFMDATA[SFEXINDEX].desc, 0, sizeof(SFMDATA[SFEXINDEX].desc));
    if (desc)
       strncpy(SFMDATA[SFEXINDEX].desc, desc, sizeof(SFMDATA[SFEXINDEX].desc));

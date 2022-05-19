@@ -81,7 +81,6 @@ extern uint8 PAL;
 
 typedef struct {
 	int PAL;
-	int NetworkPlay;
 	int SoundVolume;
 	int TriangleVolume;
 	int SquareVolume[2];
@@ -108,7 +107,6 @@ extern FCEUS FSettings;
 
 void FCEU_PrintError(char *format, ...);
 void FCEU_printf(char *format, ...);
-void FCEU_DispMessage(char *format, ...);
 
 void SetNESDeemph(uint8 d, int force);
 void DrawTextTrans(uint8 *dest, uint32 width, uint8 *textmsg, uint8 fgcolor);

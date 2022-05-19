@@ -2,7 +2,7 @@
  *
  * Copyright notice for this file:
  *  Copyright (C) 2005 CaH4e3
- *  Copyright (C) 2020 negativeExponent
+ *  Copyright (C) 2020
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,7 +20,6 @@
  */
 
 #include "mapinc.h"
-#include "../ines.h"
 
 static uint8 *CHRRAM;
 static uint32 CHRRAMSIZE;
@@ -40,7 +39,7 @@ static SFORMAT StateRegs[] =
 
 static void Sync(void) {
 	if (type && unrom) {
-		setprg16(0x8000, 0x80 | reg & 7);
+		setprg16(0x8000, 0x80 | (reg & 7));
 		setprg16(0xC000, 0x80 | 7);
 		setchr8(0);
 		setmirror(MI_V);
