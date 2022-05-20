@@ -2980,6 +2980,13 @@ void retro_run(void)
    // for now, draw into bggfx the bytes from sp_fggfx if they're not 0x80
    // THEN we can not do that... and expose the three layers to mappy
    // then we have perfect sprite and tile data.
+   for(int i = 0; i < ssize; i++) {
+     // TODO: find out the i value for mario sprite in super mario starting screen and print it out as hex
+     //if((sp_fggfx[i] != 255)) {
+     if (i > 255 && sp_fggfx[i] != 255)  { printf("idx %d, sp %xd, bg %xd\n", i, sp_fggfx[i], bggfx[i]); break; }
+       bggfx[i] = sp_fggfx[i];
+       //}
+   }
    retro_run_blit(bggfx);
 
    stereo_filter_apply(sound, ssize);

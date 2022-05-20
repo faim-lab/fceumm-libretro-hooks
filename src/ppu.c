@@ -983,7 +983,7 @@ static void CopySprites(uint8* sp_bgtarget, uint8 *target, uint8 *sp_fgtarget) {
 			if (!(t & 0x80000000)) {
               if (!(t & 0x40000000) || (P[n] & 64))	/* Normal sprite || behind bg sprite */ {
 					/* P[n] = sprlinebuf[n]; */
-                    sp_fgtarget[n] = P[n];
+                    sp_fgtarget[n] = sprlinebuf[n];
               } else {
                 sp_bgtarget[n] = sprlinebuf[n];
               }
@@ -992,7 +992,7 @@ static void CopySprites(uint8* sp_bgtarget, uint8 *target, uint8 *sp_fgtarget) {
 			if (!(t & 0x800000)) {
               if (!(t & 0x400000) || (P[n + 1] & 64))	/* Normal sprite || behind bg sprite */ {
 					/* P[n + 1] = (sprlinebuf + 1)[n]; */
-                    sp_fgtarget[n+1] = P[n+1];
+                sp_fgtarget[n+1] = (sprlinebuf+1)[n];
               } else {
               sp_bgtarget[n+1] = (sprlinebuf+1)[n];
               }
@@ -1002,7 +1002,7 @@ static void CopySprites(uint8* sp_bgtarget, uint8 *target, uint8 *sp_fgtarget) {
 				if (!(t & 0x4000) || (P[n + 2] & 64))		/* Normal sprite || behind bg sprite */
                   {
                     /* P[n + 2] = (sprlinebuf + 2)[n]; */
-                    sp_fgtarget[n+2] = P[n+2];
+                    sp_fgtarget[n+2] = (sprlinebuf + 2)[n];
                   }  else {
               sp_bgtarget[n+2] = (sprlinebuf+2)[n];
               }
@@ -1011,7 +1011,7 @@ static void CopySprites(uint8* sp_bgtarget, uint8 *target, uint8 *sp_fgtarget) {
 			if (!(t & 0x80)) {
               if (!(t & 0x40) || (P[n + 3] & 64))		/* Normal sprite || behind bg sprite */{
 					/* P[n + 3] = (sprlinebuf + 3)[n]; */
-                    sp_fgtarget[n+3] = P[n+3];
+                    sp_fgtarget[n+3] = (sprlinebuf + 3)[n];
               } else {
                 sp_bgtarget[n+3] = (sprlinebuf+3)[n];
               }
@@ -1021,16 +1021,16 @@ static void CopySprites(uint8* sp_bgtarget, uint8 *target, uint8 *sp_fgtarget) {
 			if (!(t & 0x80)) {
               if (!(t & 0x40) || (P[n] & 0x40))		/* Normal sprite || behind bg sprite */ {
                 /* P[n] = sprlinebuf[n]; */
-                sp_fgtarget[n] = P[n];
+                sp_fgtarget[n] = sprlinebuf[n];
               }else {
-                sp_bgtarget[n] = (sprlinebuf)[n];
+                sp_bgtarget[n] = sprlinebuf[n];
               }
 			}
 
 			if (!(t & 0x8000)) {
               if (!(t & 0x4000) || (P[n + 1] & 0x40))		/* Normal sprite || behind bg sprite */ {
                 /* P[n + 1] = (sprlinebuf + 1)[n]; */
-                sp_fgtarget[n+1] = P[n+1];
+                sp_fgtarget[n+1] = (sprlinebuf + 1)[n];
               }else {
                 sp_bgtarget[n+1] = (sprlinebuf+1)[n];
               }
@@ -1039,7 +1039,7 @@ static void CopySprites(uint8* sp_bgtarget, uint8 *target, uint8 *sp_fgtarget) {
 			if (!(t & 0x800000)) {
               if (!(t & 0x400000) || (P[n + 2] & 0x40))	/* Normal sprite || behind bg sprite */ {
 					/* P[n + 2] = (sprlinebuf + 2)[n]; */
-                    sp_fgtarget[n+2] = P[n+2];
+                    sp_fgtarget[n+2] = (sprlinebuf+2)[n];
               }else {
                 sp_bgtarget[n+2] = (sprlinebuf+2)[n];
               }
@@ -1048,7 +1048,7 @@ static void CopySprites(uint8* sp_bgtarget, uint8 *target, uint8 *sp_fgtarget) {
 			if (!(t & 0x80000000)) {
               if (!(t & 0x40000000) || (P[n + 3] & 0x40))	/* Normal sprite || behind bg sprite */ {
 					/* P[n + 3] = (sprlinebuf + 3)[n]; */
-                    sp_fgtarget[n+3] = P[n+3];
+                    sp_fgtarget[n+3] = (sprlinebuf+3)[n];
               }else {
                 sp_bgtarget[n+3] = (sprlinebuf+3)[n];
               }
