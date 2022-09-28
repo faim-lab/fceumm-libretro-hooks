@@ -318,7 +318,7 @@ void intercept_2006_write(uint32 a, uint8 v) {
   old_ppuaddr_write(a,v);
 }
 
-uint32 retro_count_scroll_changes(struct scroll_change *changes, uint32 max) {
+RETRO_API uint32 retro_count_scroll_changes(struct scroll_change *changes, uint32 max) {
   if (changes) {
     for (int i = 0; i < scroll_change_count && i < SCROLL_CHANGE_MAX && i < max;
          i++) {
