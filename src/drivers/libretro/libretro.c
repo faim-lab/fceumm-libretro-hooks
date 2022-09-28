@@ -270,7 +270,6 @@ static unsigned serialize_size;
 
 /* extern forward decls.*/
 extern FCEUGI *GameInfo;
-extern uint8 *XBuf;
 extern CartInfo iNESCart;
 extern CartInfo UNIFCart;
 extern int show_crosshair;
@@ -2948,12 +2947,12 @@ static void retro_run_blit(uint8_t *gfx)
       pitch  -= (crop_overscan_h_left + crop_overscan_h_right) * sizeof(uint16_t);
       gfx    += (crop_overscan_v_top * 256) + crop_overscan_h_left;
 
-      if (use_raw_palette)
+      if (0 && use_raw_palette)
       {
-         uint8_t *deemp = XDBuf + (gfx - XBuf);
-         for (y = 0; y < height; y++, gfx += incr, deemp += incr)
-            for (x = 0; x < width; x++, gfx++, deemp++)
-               fceu_video_out[y * width + x] = retro_palette[*gfx & 0x3F] | (*deemp << 2);
+         /* uint8_t *deemp = XDBuf + (gfx - XBuf); */
+         /* for (y = 0; y < height; y++, gfx += incr, deemp += incr) */
+         /*    for (x = 0; x < width; x++, gfx++, deemp++) */
+         /*       fceu_video_out[y * width + x] = retro_palette[*gfx & 0x3F] | (*deemp << 2); */
       }
       else
       {
@@ -2963,23 +2962,25 @@ static void retro_run_blit(uint8_t *gfx)
       }
       video_cb(fceu_video_out, width, height, pitch);
    }
-#endif
 }
 
 void retro_run(void)
 {
-   uint8_t *gfx;
-   int32_t ssize = 0;
-   bool updated  = false;
+   uint8_t *sp_bggfx, *bggfx, *sp_fggfx;
+   int32_t i, ssize = 0;
+   bool updated = false;
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
       check_variables(false);
 
    scroll_change_count = 0;
    FCEUD_UpdateInput();
-   FCEUI_Emulate(&gfx, &sound, &ssize, 0);
-
-   retro_run_blit(gfx);
+   FCEUI_Emulate(&sp_bggfx, &bggfx, &sp_fggfx, &sound, &ssize, 0);
+   // TODO don't draw sprites into bg, combine gfx layers into gfx here
+   // for now, draw into bggfx the bytes from sp_fggfx if they're not 0x80
+   // THEN we can not do that... and expose the three layers to mappy
+   // then we have perfect sprite and tile data.
+   retro_run_blit(bggfx);
 
    stereo_filter_apply(sound, ssize);
    audio_batch_cb((const int16_t*)sound, ssize);

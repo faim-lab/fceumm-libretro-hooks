@@ -53,7 +53,7 @@
 static void FetchSpriteData(void);
 static void RefreshLine(int lastpixel);
 static void RefreshSprites(void);
-static void CopySprites(uint8 *target);
+static void CopySprites(uint8 *sp_bgtarget, uint8 *target, uint8 *sp_fgtarget);
 
 static void Fixit1(void);
 static uint32 ppulut1[256];
@@ -625,7 +625,9 @@ void MMC5_hb(int);		/* Ugh ugh ugh. */
 static void DoLine(void)
 {
 	int x, colour_emphasis;
-	uint8 *target = NULL;
+	uint8 *sp_bgtarget = NULL;
+	uint8 *bgtarget = NULL;
+	uint8 *sp_fgtarget = NULL;
 	uint8 *dtarget = NULL;
 
 	if (scanline >= 240 && scanline != totalscanlines)
@@ -636,7 +638,9 @@ static void DoLine(void)
 		return;
 	}
 
-	target = XBuf + ((scanline < 240 ? scanline : 240) << 8);
+	sp_bgtarget = sp_bgXBuf + ((scanline < 240 ? scanline : 240) << 8);
+	bgtarget = bgXBuf + ((scanline < 240 ? scanline : 240) << 8);
+	sp_fgtarget = sp_fgXBuf + ((scanline < 240 ? scanline : 240) << 8);
 	dtarget = XDBuf + ((scanline < 240 ? scanline : 240) << 8);
 
 	if (MMC5Hack && (ScreenON || SpriteON)) MMC5_hb(scanline);
@@ -648,27 +652,29 @@ static void DoLine(void)
 		uint32 tem;
 		tem = PALRAM[0] | (PALRAM[0] << 8) | (PALRAM[0] << 16) | (PALRAM[0] << 24);
 		tem |= 0x40404040;
-		FCEU_dwmemset(target, tem, 256);
+		FCEU_dwmemset(sp_bgtarget, tem, 256);
+		FCEU_dwmemset(bgtarget, tem, 256);
+		FCEU_dwmemset(sp_fgtarget, tem, 256);
 	}
 
 	if (SpriteON)
-		CopySprites(target);
+      CopySprites(sp_bgtarget, bgtarget, sp_fgtarget);
 
 	if (ScreenON || SpriteON) {	/* Yes, very el-cheapo. */
 		if (PPU[1] & 0x01) {
 			for (x = 63; x >= 0; x--)
-				*(uint32*)&target[x << 2] = (*(uint32*)&target[x << 2]) & 0x30303030;
+				*(uint32*)&bgtarget[x << 2] = (*(uint32*)&bgtarget[x << 2]) & 0x30303030;
 		}
 	}
 	if ((PPU[1] >> 5) == 0x7) {
 		for (x = 63; x >= 0; x--)
-			*(uint32*)&target[x << 2] = ((*(uint32*)&target[x << 2]) & 0x3f3f3f3f) | 0xc0c0c0c0;
+			*(uint32*)&bgtarget[x << 2] = ((*(uint32*)&bgtarget[x << 2]) & 0x3f3f3f3f) | 0xc0c0c0c0;
 	} else if (PPU[1] & 0xE0)
 		for (x = 63; x >= 0; x--)
-			*(uint32*)&target[x << 2] = (*(uint32*)&target[x << 2]) | 0x40404040;
+			*(uint32*)&bgtarget[x << 2] = (*(uint32*)&bgtarget[x << 2]) | 0x40404040;
 	else
 		for (x = 63; x >= 0; x--)
-			*(uint32*)&target[x << 2] = ((*(uint32*)&target[x << 2]) & 0x3f3f3f3f) | 0x80808080;
+			*(uint32*)&bgtarget[x << 2] = ((*(uint32*)&bgtarget[x << 2]) & 0x3f3f3f3f) | 0x80808080;
 
 	/* write the actual colour emphasis */
 	colour_emphasis = ((PPU[1] >> 5) << 24) | ((PPU[1] >> 5) << 16) | ((PPU[1] >> 5) << 8) | ((PPU[1] >> 5) << 0);
@@ -702,7 +708,9 @@ static void DoLine(void)
 		GameHBIRQHook2();
 	scanline++;
 	if (scanline < 240) {
-		ResetRL(XBuf + (scanline << 8));
+		ResetRL(bgXBuf + (scanline << 8));
+        memset(sp_bgXBuf + (scanline<<8), 0xFF, 256);
+        memset(sp_fgXBuf + (scanline<<8), 0xFF, 256);
 	}
 	X6502_Run(16);
 }
@@ -957,7 +965,7 @@ static void RefreshSprites(void) {
 	spork = 1;
 }
 
-static void CopySprites(uint8 *target) {
+static void CopySprites(uint8* sp_bgtarget, uint8 *target, uint8 *sp_fgtarget) {
 	uint8 n = ((PPU[1] & 4) ^ 4) << 1;
 	uint8 *P = target;
 
@@ -973,44 +981,77 @@ static void CopySprites(uint8 *target) {
 		if (t != 0x80808080) {
 			#ifdef MSB_FIRST
 			if (!(t & 0x80000000)) {
-				if (!(t & 0x40000000) || (P[n] & 64))	/* Normal sprite || behind bg sprite */
-					P[n] = sprlinebuf[n];
+              if (!(t & 0x40000000) || (P[n] & 64))	/* Normal sprite || behind bg sprite */ {
+					/* P[n] = sprlinebuf[n]; */
+                    sp_fgtarget[n] = P[n];
+              } else {
+                sp_bgtarget[n] = sprlinebuf[n];
+              }
 			}
 
 			if (!(t & 0x800000)) {
-				if (!(t & 0x400000) || (P[n + 1] & 64))	/* Normal sprite || behind bg sprite */
-					P[n + 1] = (sprlinebuf + 1)[n];
+              if (!(t & 0x400000) || (P[n + 1] & 64))	/* Normal sprite || behind bg sprite */ {
+					/* P[n + 1] = (sprlinebuf + 1)[n]; */
+                    sp_fgtarget[n+1] = P[n+1];
+              } else {
+              sp_bgtarget[n+1] = (sprlinebuf+1)[n];
+              }
 			}
 
 			if (!(t & 0x8000)) {
 				if (!(t & 0x4000) || (P[n + 2] & 64))		/* Normal sprite || behind bg sprite */
-					P[n + 2] = (sprlinebuf + 2)[n];
+                  {
+                    /* P[n + 2] = (sprlinebuf + 2)[n]; */
+                    sp_fgtarget[n+2] = P[n+2];
+                  }  else {
+              sp_bgtarget[n+2] = (sprlinebuf+2)[n];
+              }
 			}
 
 			if (!(t & 0x80)) {
-				if (!(t & 0x40) || (P[n + 3] & 64))		/* Normal sprite || behind bg sprite */
-					P[n + 3] = (sprlinebuf + 3)[n];
+              if (!(t & 0x40) || (P[n + 3] & 64))		/* Normal sprite || behind bg sprite */{
+					/* P[n + 3] = (sprlinebuf + 3)[n]; */
+                    sp_fgtarget[n+3] = P[n+3];
+              } else {
+                sp_bgtarget[n+3] = (sprlinebuf+3)[n];
+              }
 			}
 			#else
 
 			if (!(t & 0x80)) {
-				if (!(t & 0x40) || (P[n] & 0x40))		/* Normal sprite || behind bg sprite */
-					P[n] = sprlinebuf[n];
+              if (!(t & 0x40) || (P[n] & 0x40))		/* Normal sprite || behind bg sprite */ {
+                /* P[n] = sprlinebuf[n]; */
+                sp_fgtarget[n] = P[n];
+              }else {
+                sp_bgtarget[n] = (sprlinebuf)[n];
+              }
 			}
 
 			if (!(t & 0x8000)) {
-				if (!(t & 0x4000) || (P[n + 1] & 0x40))		/* Normal sprite || behind bg sprite */
-					P[n + 1] = (sprlinebuf + 1)[n];
+              if (!(t & 0x4000) || (P[n + 1] & 0x40))		/* Normal sprite || behind bg sprite */ {
+                /* P[n + 1] = (sprlinebuf + 1)[n]; */
+                sp_fgtarget[n+1] = P[n+1];
+              }else {
+                sp_bgtarget[n+1] = (sprlinebuf+1)[n];
+              }
 			}
 
 			if (!(t & 0x800000)) {
-				if (!(t & 0x400000) || (P[n + 2] & 0x40))	/* Normal sprite || behind bg sprite */
-					P[n + 2] = (sprlinebuf + 2)[n];
+              if (!(t & 0x400000) || (P[n + 2] & 0x40))	/* Normal sprite || behind bg sprite */ {
+					/* P[n + 2] = (sprlinebuf + 2)[n]; */
+                    sp_fgtarget[n+2] = P[n+2];
+              }else {
+                sp_bgtarget[n+2] = (sprlinebuf+2)[n];
+              }
 			}
 
 			if (!(t & 0x80000000)) {
-				if (!(t & 0x40000000) || (P[n + 3] & 0x40))	/* Normal sprite || behind bg sprite */
-					P[n + 3] = (sprlinebuf + 3)[n];
+              if (!(t & 0x40000000) || (P[n + 3] & 0x40))	/* Normal sprite || behind bg sprite */ {
+					/* P[n + 3] = (sprlinebuf + 3)[n]; */
+                    sp_fgtarget[n+3] = P[n+3];
+              }else {
+                sp_bgtarget[n+3] = (sprlinebuf+3)[n];
+              }
 			}
 			#endif
 		}
@@ -1078,7 +1119,9 @@ void FCEUPPU_Power(void) {
 int FCEUPPU_Loop(int skip) {
 	/* Needed for Knight Rider, possibly others. */
 	if (ppudead) {
-		memset(XBuf, 0x80, 256 * 240);
+		memset(sp_bgXBuf, 0x80, 256 * 240);
+		memset(bgXBuf, 0x80, 256 * 240);
+		memset(sp_fgXBuf, 0x80, 256 * 240);
 		X6502_Run(scanlines_per_frame * (256 + 85));
 		ppudead--;
 	} else {
@@ -1131,7 +1174,7 @@ int FCEUPPU_Loop(int skip) {
 
 			/* Clean this stuff up later. */
 			spork = numsprites = 0;
-			ResetRL(XBuf);
+			ResetRL(bgXBuf);
 
 			X6502_Run(16 - kook);
 			kook ^= 1;

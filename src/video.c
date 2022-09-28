@@ -35,15 +35,23 @@
 #include "input.h"
 #include "vsuni.h"
 
-uint8 *XBuf = NULL;
+uint8 *sp_bgXBuf = NULL;
+uint8 *bgXBuf = NULL;
+uint8 *sp_fgXBuf = NULL;
 uint8 *XDBuf = NULL;
 int show_crosshair = 0;
 
 void FCEU_KillVirtualVideo(void)
 {
-	if (XBuf)
-		free(XBuf);
-   XBuf = 0;
+	if (sp_bgXBuf)
+		free(sp_bgXBuf);
+   sp_bgXBuf = 0;
+	if (bgXBuf)
+		free(bgXBuf);
+   bgXBuf = 0;
+	if (sp_fgXBuf)
+		free(sp_fgXBuf);
+   sp_fgXBuf = 0;
    if (XDBuf)
 		free(XDBuf);
    XDBuf = 0;
@@ -52,15 +60,21 @@ void FCEU_KillVirtualVideo(void)
 int FCEU_InitVirtualVideo(void)
 {
    /* 256 bytes per scanline, * 240 scanline maximum, +8 for alignment, */
-   if (!XBuf)
-      XBuf = (uint8*)(FCEU_malloc(256 * (256 + extrascanlines + 8)));
+   if (!sp_bgXBuf)
+      sp_bgXBuf = (uint8*)(FCEU_malloc(256 * (256 + extrascanlines + 8)));
+   if (!bgXBuf)
+      bgXBuf = (uint8*)(FCEU_malloc(256 * (256 + extrascanlines + 8)));
+   if (!sp_fgXBuf)
+      sp_fgXBuf = (uint8*)(FCEU_malloc(256 * (256 + extrascanlines + 8)));
    if (!XDBuf)
       XDBuf = (uint8*)(FCEU_malloc(256 * (256 + extrascanlines + 8)));
 
-   if (!XBuf || !XDBuf)
+   if (!bgXBuf || !sp_bgXBuf || !sp_fgXBuf || !XDBuf)
       return 0;
 
-   memset(XBuf, 128, 256 * (256 + extrascanlines + 8));
+   memset(sp_bgXBuf, 128, 256 * (256 + extrascanlines + 8));
+   memset(bgXBuf, 128, 256 * (256 + extrascanlines + 8));
+   memset(sp_fgXBuf, 128, 256 * (256 + extrascanlines + 8));
    memset(XDBuf, 128, 256 * (256 + extrascanlines + 8));
    return 1;
 }
@@ -70,14 +84,14 @@ int FCEU_InitVirtualVideo(void)
 void FCEU_PutImage(void)
 {
 	if (GameInfo->type == GIT_NSF)
-		DrawNSF(XBuf);
+		DrawNSF(bgXBuf);
    else
    {
 		if (GameInfo->type == GIT_VSUNI)
-			FCEU_VSUniDraw(XBuf);
+			FCEU_VSUniDraw(bgXBuf);
 	}
 	if (show_crosshair)
-		FCEU_DrawInput(XBuf);
+		FCEU_DrawInput(bgXBuf);
 }
 
 void FCEU_PutImageDummy(void)

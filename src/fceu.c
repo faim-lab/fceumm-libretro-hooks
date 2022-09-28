@@ -301,7 +301,7 @@ void FCEUI_Kill(void) {
 	FCEU_KillGenie();
 }
 
-void FCEUI_Emulate(uint8 **pXBuf, int32 **SoundBuf, int32 *SoundBufSize, int skip) {
+void FCEUI_Emulate(uint8 **sp_bg, uint8 **bg, uint8 **sp_fg, int32 **SoundBuf, int32 *SoundBufSize, int skip) {
 	int r, ssize;
 
 	FCEU_UpdateInput();
@@ -315,7 +315,9 @@ void FCEUI_Emulate(uint8 **pXBuf, int32 **SoundBuf, int32 *SoundBufSize, int ski
 	timestamp = 0;
 	sound_timestamp = 0;
 
-	*pXBuf = skip ? 0 : XBuf;
+	*sp_bg = skip ? 0 : sp_bgXBuf;
+	*bg = skip ? 0 : bgXBuf;
+	*sp_fg = skip ? 0 : sp_fgXBuf;
 	*SoundBuf = WaveFinal;
 	*SoundBufSize = ssize;
 }
