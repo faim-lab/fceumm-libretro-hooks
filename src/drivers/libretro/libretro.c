@@ -73,6 +73,57 @@
 #define NES_PAL_FPS  (838977920.0 / 16777215.0)
 #define NES_NTSC_FPS (1008307711.0 / 16777215.0)
 
+/* hacks for noticing scroll events */
+#define SCROLL_CHANGE_MAX 32000
+uint32 scroll_change_count = 0;
+enum scroll_change_reason { write2005, write2006, read2002 };
+
+struct scroll_change {
+  enum scroll_change_reason reason;
+  uint8 scanline;
+  uint8 value;
+};
+struct scroll_change scroll_changes[SCROLL_CHANGE_MAX];
+
+readfunc old_2002_read;
+writefunc old_scroll_write;
+writefunc old_ppuaddr_write;
+
+void add_change(enum scroll_change_reason reason, uint32 scanline,
+                uint8 value) {
+  if (scroll_change_count >= SCROLL_CHANGE_MAX) {
+    scroll_change_count++;
+    return;
+  }
+  scroll_changes[scroll_change_count] =
+      (struct scroll_change){reason, scanline, value};
+  scroll_change_count++;
+}
+
+uint8 intercept_2002_read(uint32 a) {
+  add_change(read2002, scanline, 0);
+  return old_2002_read(a);
+}
+void intercept_scroll_write(uint32 a, uint8 v) {
+  add_change(write2005, scanline, v);
+  old_scroll_write(a,v);
+}
+void intercept_2006_write(uint32 a, uint8 v) {
+  add_change(write2006, scanline, v);
+  old_ppuaddr_write(a,v);
+}
+
+RETRO_API uint32 retro_count_scroll_changes(struct scroll_change *changes, uint32 max) {
+  if (changes) {
+    for (int i = 0; i < scroll_change_count && i < SCROLL_CHANGE_MAX && i < max;
+         i++) {
+      changes[i] = scroll_changes[i];
+    }
+  }
+  return scroll_change_count;
+}
+
+
 #if defined(_3DS)
 void* linearMemAlign(size_t size, size_t alignment);
 void linearFree(void* mem);
@@ -2875,6 +2926,7 @@ void retro_run(void)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
       check_variables(false);
 
+   scroll_change_count = 0;
    FCEUD_UpdateInput();
    FCEUI_Emulate(&gfx, &sound, &ssize, 0);
 
@@ -3620,7 +3672,16 @@ bool retro_load_game(const struct retro_game_info *info)
    i++;
    mmaps.descriptors = descs;
    mmaps.num_descriptors = i;
+
    environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &mmaps);
+
+   old_2002_read = GetReadHandler(0x2002);
+   SetReadHandler(0x2002, 0x2002, intercept_2002_read);
+   old_scroll_write = GetWriteHandler(0x2005);
+   SetWriteHandler(0x2005, 0x2005, intercept_scroll_write);
+   old_ppuaddr_write = GetWriteHandler(0x2006);
+   SetWriteHandler(0x2006, 0x2006, intercept_2006_write);
+
 
    return true;
 }
