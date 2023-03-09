@@ -660,21 +660,33 @@ static void DoLine(void)
 	if (SpriteON)
       CopySprites(sp_bgtarget, bgtarget, sp_fgtarget);
 
-	if (ScreenON || SpriteON) {	/* Yes, very el-cheapo. */
-		if (PPU[1] & 0x01) {
-			for (x = 63; x >= 0; x--)
-				*(uint32*)&bgtarget[x << 2] = (*(uint32*)&bgtarget[x << 2]) & 0x30303030;
+    if (ScreenON || SpriteON) {	/* Yes, very el-cheapo. */
+		if (PPU[1] & 0x01) { /* Grayscale bit */
+	  for (x = 63; x >= 0; x--) {
+		*(uint32*)&sp_bgtarget[x << 2] = (*(uint32*)&sp_bgtarget[x << 2]) & 0x30303030;
+		*(uint32*)&bgtarget[x << 2] = (*(uint32*)&bgtarget[x << 2]) & 0x30303030;
+		*(uint32*)&sp_fgtarget[x << 2] = (*(uint32*)&sp_fgtarget[x << 2]) & 0x30303030;
+      }
 		}
 	}
-	if ((PPU[1] >> 5) == 0x7) {
-		for (x = 63; x >= 0; x--)
-			*(uint32*)&bgtarget[x << 2] = ((*(uint32*)&bgtarget[x << 2]) & 0x3f3f3f3f) | 0xc0c0c0c0;
-	} else if (PPU[1] & 0xE0)
-		for (x = 63; x >= 0; x--)
+	if ((PPU[1] >> 5) == 0x7) { /* show sprite bit */
+	  for (x = 63; x >= 0; x--) {
+	    *(uint32*)&sp_bgtarget[x << 2] = ((*(uint32*)&sp_bgtarget[x << 2]) & 0x3f3f3f3f) | 0xc0c0c0c0;
+	    *(uint32*)&bgtarget[x << 2] = ((*(uint32*)&bgtarget[x << 2]) & 0x3f3f3f3f) | 0xc0c0c0c0;
+	    *(uint32*)&sp_fgtarget[x << 2] = ((*(uint32*)&sp_fgtarget[x << 2]) & 0x3f3f3f3f) | 0xc0c0c0c0;
+      }
+	} else if (PPU[1] & 0xE0) /* color emphasis */
+		for (x = 63; x >= 0; x--) {
+			*(uint32*)&sp_bgtarget[x << 2] = (*(uint32*)&sp_bgtarget[x << 2]) | 0x40404040;
 			*(uint32*)&bgtarget[x << 2] = (*(uint32*)&bgtarget[x << 2]) | 0x40404040;
+			*(uint32*)&sp_fgtarget[x << 2] = (*(uint32*)&sp_fgtarget[x << 2]) | 0x40404040;
+        }
 	else
-		for (x = 63; x >= 0; x--)
+		for (x = 63; x >= 0; x--) {
+			*(uint32*)&sp_bgtarget[x << 2] = ((*(uint32*)&sp_bgtarget[x << 2]) & 0x3f3f3f3f) | 0x80808080;
 			*(uint32*)&bgtarget[x << 2] = ((*(uint32*)&bgtarget[x << 2]) & 0x3f3f3f3f) | 0x80808080;
+			*(uint32*)&sp_fgtarget[x << 2] = ((*(uint32*)&sp_fgtarget[x << 2]) & 0x3f3f3f3f) | 0x80808080;
+        }
 
 	/* write the actual colour emphasis */
 	colour_emphasis = ((PPU[1] >> 5) << 24) | ((PPU[1] >> 5) << 16) | ((PPU[1] >> 5) << 8) | ((PPU[1] >> 5) << 0);

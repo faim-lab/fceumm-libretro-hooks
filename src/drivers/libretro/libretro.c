@@ -2976,17 +2976,19 @@ void retro_run(void)
    scroll_change_count = 0;
    FCEUD_UpdateInput();
    FCEUI_Emulate(&sp_bggfx, &bggfx, &sp_fggfx, &sound, &ssize, 0);
-   // TODO don't draw sprites into bg, combine gfx layers into gfx here
-   // for now, draw into bggfx the bytes from sp_fggfx if they're not 0x80
-   // THEN we can not do that... and expose the three layers to mappy
-   // then we have perfect sprite and tile data.
-   for(int i = 0; i < ssize; i++) {
-     // TODO: find out the i value for mario sprite in super mario starting screen and print it out as hex
-     //if((sp_fggfx[i] != 255)) {
-     if (i > 255 && sp_fggfx[i] != 255)  { printf("idx %d, sp %xd, bg %xd\n", i, sp_fggfx[i], bggfx[i]); break; }
-       bggfx[i] = sp_fggfx[i];
-       //}
-   }
+  /* TODO use a fourth framebuffer to blit these into instead of
+     bggfx, then expose all four to mappy so it can have an oracle for
+     layering. */
+   for(int i = 0; i < NES_WIDTH*NES_HEIGHT; i++) {
+    if((sp_fggfx[i] != 191)) {
+      bggfx[i] = sp_fggfx[i];
+    }
+    if((sp_bggfx[i] != 191)) {
+      if(bggfx[i] == 191) {
+        bggfx[i] = sp_bggfx[i];
+      }
+    }
+  }
    retro_run_blit(bggfx);
 
    stereo_filter_apply(sound, ssize);
@@ -3559,10 +3561,10 @@ bool retro_load_game(const struct retro_game_info *game)
    }
    else
    {
-      if (!info || string_is_empty(info->path))
+      if (!game || string_is_empty(game->path))
          return false;
 
-      strlcpy(content_path, info->path,
+      strlcpy(content_path, game->path,
             sizeof(content_path));
    }
 
