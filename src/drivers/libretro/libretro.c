@@ -133,6 +133,9 @@ void linearFree(void* mem);
 RETRO_HW_RENDER_INTEFACE_GSKIT_PS2 *ps2 = NULL;
 #endif
 
+uint8_t *sp_bggfx, *bggfx, *sp_fggfx;
+
+
 extern void FCEU_ZapperSetTolerance(int t);
 
 static retro_video_refresh_t video_cb = NULL;
@@ -255,6 +258,7 @@ static uint16_t retro_palette[256];
 static uint8_t* fceu_video_out;
 #else
 static uint16_t* fceu_video_out;
+static uint8_t* out_gfx;
 #endif
 
 /* Some timing-related variables. */
@@ -325,6 +329,18 @@ RETRO_API uint32 retro_count_scroll_changes(struct scroll_change *changes, uint3
     }
   }
   return scroll_change_count;
+}
+
+RETRO_API int retro_layer_count() {
+  return 3;
+}
+RETRO_API char *retro_layer(int i) {
+  switch (i) {
+  case 0: return sp_bggfx;
+  case 1: return bggfx;
+  case 2: return sp_fggfx;
+  default: return NULL;
+  }
 }
 
 /* emulator-specific callback functions */
@@ -1896,6 +1912,9 @@ void retro_deinit (void)
    if (fceu_video_out)
       free(fceu_video_out);
    fceu_video_out = NULL;
+   if (out_gfx)
+      free(out_gfx);
+   out_gfx = NULL;
 #endif
 #if defined(RENDER_GSKIT_PS2)
    ps2 = NULL;
@@ -2966,7 +2985,6 @@ static void retro_run_blit(uint8_t *gfx)
 
 void retro_run(void)
 {
-   uint8_t *sp_bggfx, *bggfx, *sp_fggfx;
    int32_t i, ssize = 0;
    bool updated = false;
 
@@ -2976,20 +2994,18 @@ void retro_run(void)
    scroll_change_count = 0;
    FCEUD_UpdateInput();
    FCEUI_Emulate(&sp_bggfx, &bggfx, &sp_fggfx, &sound, &ssize, 0);
-  /* TODO use a fourth framebuffer to blit these into instead of
-     bggfx, then expose all four to mappy so it can have an oracle for
-     layering. */
    for(int i = 0; i < NES_WIDTH*NES_HEIGHT; i++) {
-    if((sp_fggfx[i] != 191)) {
-      bggfx[i] = sp_fggfx[i];
-    }
-    if((sp_bggfx[i] != 191)) {
-      if(bggfx[i] == 191) {
-        bggfx[i] = sp_bggfx[i];
-      }
-    }
-  }
-   retro_run_blit(bggfx);
+     out_gfx[i] = bggfx[i];
+     if((sp_fggfx[i] != 191)) {
+       out_gfx[i] = sp_fggfx[i];
+     }
+     if((sp_bggfx[i] != 191)) {
+       if(bggfx[i] == 191) {
+         out_gfx[i] = sp_bggfx[i];
+       }
+     }
+   }
+   retro_run_blit(out_gfx);
 
    stereo_filter_apply(sound, ssize);
    audio_batch_cb((const int16_t*)sound, ssize);
@@ -3603,6 +3619,7 @@ bool retro_load_game(const struct retro_game_info *game)
 #define FB_HEIGHT NES_HEIGHT
 #endif
    fceu_video_out = (uint16_t*)malloc(FB_WIDTH * FB_HEIGHT * sizeof(uint16_t));
+   out_gfx = (uint8_t*)malloc(NES_WIDTH * NES_HEIGHT * sizeof(uint8_t));
 #endif
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system_dir) && system_dir)
@@ -3771,6 +3788,9 @@ void retro_unload_game(void)
    if (fceu_video_out)
       free(fceu_video_out);
    fceu_video_out = NULL;
+   if (out_gfx)
+      free(out_gfx);
+   out_gfx = NULL;
 #endif
 #if defined(RENDER_GSKIT_PS2)
    ps2 = NULL;
